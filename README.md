@@ -260,11 +260,9 @@ Run a single test module with:
 uv run python -m unittest tests.test_query_filters
 ```
 
-Most network access is replaced by test doubles. The parser integration tests
-additionally expect five JATS example files in `data/pmc_jats/`; the expected
-PMCIDs are listed in `tests/_shared.py`. These files are not included in the
-current repository snapshot, so that part of the test suite fails when they
-are absent.
+Most network access is replaced by test doubles. Small synthetic JATS documents
+under `tests/fixtures/jats/` exercise the parser integration path without
+requiring downloaded PMC articles.
 
 ## Operational notes
 

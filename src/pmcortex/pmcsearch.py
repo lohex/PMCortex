@@ -1,3 +1,5 @@
+"""Search the PMC website for article identifiers and titles."""
+
 import re
 from urllib.parse import quote_plus
 
@@ -30,8 +32,11 @@ class PMCSearch(HTTPContextManager):
         )
 
     def search(self, search: str) -> None:
-        """Run a search and extract PMCID/title hits."""
-        self.query = search
+        """Populate this instance with hits for a non-empty search query."""
+        query = search.strip()
+        if not query:
+            raise ValueError("search must not be empty")
+        self.query = query
         self.get_results()
         self.extract_pmcids()
 
@@ -56,8 +61,6 @@ class PMCSearch(HTTPContextManager):
             raise ValueError("No parsed document available. Call get_results() first.")
 
         hits: list[dict[str, str]] = []
-        #seen: set[str] = set()
-        # https://pmc.ncbi.nlm.nih.gov/articles/PMC5513360
         for node in self.doc.xpath("//a[contains(@href, '/pmc.ncbi.nlm.nih.gov/articles/PMC')]"):
             pmcid = node.get('data-ga-label')
 
@@ -67,7 +70,6 @@ class PMCSearch(HTTPContextManager):
                 title = pmcid
 
             hits.append({"pmcid": pmcid, "title": title})
-            #seen.add(pmcid)
 
         self.hit_list = hits
         logger.info(f"Extracted {len(self.hit_list)} PMCID hits")

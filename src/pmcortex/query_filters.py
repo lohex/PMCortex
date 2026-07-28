@@ -1,11 +1,12 @@
+"""Filter citation-derived retrieval queries and select hard negatives."""
+
 from __future__ import annotations
 
 from ast import literal_eval
+from collections.abc import Hashable, Iterable
 import heapq
 from pathlib import Path
 import re
-import sys
-from typing import Any, Iterable
 
 import pandas as pd
 from loguru import logger
@@ -139,8 +140,23 @@ LOCAL_CONTEXT_REFERENCE_PATTERN = re.compile(
 
 
 class QueryFilterPipeline:
+    """Filter extracted contexts by mutating `filtered_df` and returning `self`."""
+
     def __init__(self, data_dir: str | Path) -> None:
+        """Load the three extraction CSV files from `data_dir`."""
         self.data_dir = Path(data_dir)
+        required_files = (
+            "extracted_contexts.csv",
+            "extracted_metadata.csv",
+            "extracted_sources.csv",
+        )
+        missing_files = [
+            name for name in required_files if not (self.data_dir / name).is_file()
+        ]
+        if missing_files:
+            missing = ", ".join(missing_files)
+            raise FileNotFoundError(f"Missing pipeline input files: {missing}")
+
         logger.info("Initializing QueryFilterPipeline from {}", self.data_dir)
 
         self.df_contexts = pd.read_csv(
@@ -184,11 +200,15 @@ class QueryFilterPipeline:
         )
 
     def reset(self) -> "QueryFilterPipeline":
+        """Restore the unfiltered contexts and return this pipeline."""
         self.filtered_df = self.df_contexts.copy()
         logger.info("Reset filtered query set to {} rows", len(self.filtered_df))
         return self
 
     def filter_min_hit_queries(self, n: int = 1) -> "QueryFilterPipeline":
+        """Keep queries containing exactly `n` cited positive documents."""
+        if n <= 0:
+            raise ValueError("n must be positive")
         self.filtered_df = self._apply_filter(
             f"filter_min_hit_queries(n={n})",
             self.filtered_df["n_hits"].eq(n),
@@ -196,6 +216,7 @@ class QueryFilterPipeline:
         return self
 
     def filter_no_et_al_queries(self) -> "QueryFilterPipeline":
+        """Remove queries containing the phrase `et al.`."""
         self.filtered_df = self._apply_filter(
             "filter_no_et_al_queries",
             ~self.filtered_df["query"].fillna("").str.contains(ET_AL_PATTERN),
@@ -203,6 +224,7 @@ class QueryFilterPipeline:
         return self
 
     def filter_no_explicit_spoilers(self) -> "QueryFilterPipeline":
+        """Remove queries that explicitly name an author of a cited paper."""
         self._ensure_explicit_spoiler()
         self.filtered_df = self._apply_filter(
             "filter_no_explicit_spoilers",
@@ -211,6 +233,7 @@ class QueryFilterPipeline:
         return self
 
     def filter_no_self_citations(self) -> "QueryFilterPipeline":
+        """Remove queries whose cited papers include a self-citation."""
         self._ensure_self_citation()
         self.filtered_df = self._apply_filter(
             "filter_no_self_citations",
@@ -219,6 +242,9 @@ class QueryFilterPipeline:
         return self
 
     def filter_min_source_count(self, n: int) -> "QueryFilterPipeline":
+        """Keep queries from articles with at least `n` indexed references."""
+        if n <= 0:
+            raise ValueError("n must be positive")
         self._ensure_n_sources()
         self.filtered_df = self._apply_filter(
             f"filter_min_source_count(n={n})",
@@ -227,6 +253,9 @@ class QueryFilterPipeline:
         return self
 
     def filter_max_strangeness(self, threshold: float = 0.3) -> "QueryFilterPipeline":
+        """Keep queries whose non-alphanumeric character ratio is at most `threshold`."""
+        if not 0 <= threshold <= 1:
+            raise ValueError("threshold must be between 0 and 1")
         self._ensure_strangeness()
         self.filtered_df = self._apply_filter(
             f"filter_max_strangeness(threshold={threshold})",
@@ -235,6 +264,9 @@ class QueryFilterPipeline:
         return self
 
     def filter_min_query_length(self, n: int) -> "QueryFilterPipeline":
+        """Keep queries containing at least `n` words."""
+        if n <= 0:
+            raise ValueError("n must be positive")
         self._ensure_query_length()
         self.filtered_df = self._apply_filter(
             f"filter_min_query_length(n={n})",
@@ -243,6 +275,9 @@ class QueryFilterPipeline:
         return self
 
     def filter_max_query_length(self, n: int) -> "QueryFilterPipeline":
+        """Keep queries containing at most `n` words."""
+        if n <= 0:
+            raise ValueError("n must be positive")
         self._ensure_query_length()
         self.filtered_df = self._apply_filter(
             f"filter_max_query_length(n={n})",
@@ -254,38 +289,53 @@ class QueryFilterPipeline:
         self,
         starts: Iterable[str] | None = None,
     ) -> "QueryFilterPipeline":
-        starts = tuple(starts or DEFAULT_ANAPHORIC_STARTS)
-        self.filtered_df = self._apply_filter(
-            f"filter_no_anaphoric_starts(starts={starts})",
-            ~self.filtered_df["query"].fillna("").apply(
-                lambda query: _starts_with_any_phrase(query, starts)
-            ),
+        """Remove queries that begin with an anaphoric expression."""
+        selected_starts = DEFAULT_ANAPHORIC_STARTS if starts is None else tuple(starts)
+        return self._filter_query_starts(
+            selected_starts,
+            "filter_no_anaphoric_starts",
         )
-        return self
 
     def filter_no_reference_framing_starts(
         self,
         starts: Iterable[str] | None = None,
     ) -> "QueryFilterPipeline":
-        starts = tuple(starts or DEFAULT_REFERENCE_FRAMING_STARTS)
-        self.filtered_df = self._apply_filter(
-            f"filter_no_reference_framing_starts(starts={starts})",
-            ~self.filtered_df["query"].fillna("").apply(
-                lambda query: _starts_with_any_phrase(query, starts)
-            ),
+        """Remove queries that begin with explicit reference framing."""
+        selected_starts = (
+            DEFAULT_REFERENCE_FRAMING_STARTS if starts is None else tuple(starts)
         )
-        return self
+        return self._filter_query_starts(
+            selected_starts,
+            "filter_no_reference_framing_starts",
+        )
 
     def filter_no_summary_starts(
         self,
         starts: Iterable[str] | None = None,
     ) -> "QueryFilterPipeline":
-        starts = tuple(starts or DEFAULT_SUMMARY_STARTS)
+        """Remove queries that begin with a discourse-summary expression."""
+        selected_starts = DEFAULT_SUMMARY_STARTS if starts is None else tuple(starts)
+        return self._filter_query_starts(
+            selected_starts,
+            "filter_no_summary_starts",
+        )
+
+    def filter_self_contained_queries(self) -> "QueryFilterPipeline":
+        """Remove queries that depend on preceding text or local document elements."""
+        starts = (
+            *DEFAULT_ANAPHORIC_STARTS,
+            *DEFAULT_REFERENCE_FRAMING_STARTS,
+            *DEFAULT_LOCAL_CONTEXT_STARTS,
+        )
+        starts_mask = self.filtered_df["query"].fillna("").apply(
+            lambda query: _starts_with_any_phrase(query, starts)
+        )
+        local_reference_mask = self.filtered_df["query"].fillna("").str.contains(
+            LOCAL_CONTEXT_REFERENCE_PATTERN
+        )
         self.filtered_df = self._apply_filter(
-            f"filter_no_summary_starts(starts={starts})",
-            ~self.filtered_df["query"].fillna("").apply(
-                lambda query: _starts_with_any_phrase(query, starts)
-            ),
+            "filter_self_contained_queries",
+            ~(starts_mask | local_reference_mask),
         )
         return self
 
@@ -293,10 +343,13 @@ class QueryFilterPipeline:
         self,
         connectives: Iterable[str] | None = None,
     ) -> "QueryFilterPipeline":
-        connectives = tuple(connectives or DEFAULT_CONNECTIVES)
+        """Remove leading discourse connectives from the current queries."""
+        selected_connectives = (
+            DEFAULT_CONNECTIVES if connectives is None else tuple(connectives)
+        )
         self.filtered_df = self.filtered_df.copy()
         self.filtered_df["query"] = self.filtered_df["query"].apply(
-            lambda query: _cleanup_query_text(query, connectives)
+            lambda query: _cleanup_query_text(query, selected_connectives)
         )
         self._invalidate_query_dependent_annotations()
         logger.info("Cleaned leading connectives for {} rows", len(self.filtered_df))
@@ -372,7 +425,24 @@ class QueryFilterPipeline:
 
         return selected_df, sorted(selected_ref_set)
 
+    def _filter_query_starts(
+        self,
+        starts: Iterable[str],
+        filter_name: str,
+    ) -> "QueryFilterPipeline":
+        """Remove queries beginning with one of `starts`."""
+        selected_starts = tuple(starts)
+        keep_mask = ~self.filtered_df["query"].fillna("").apply(
+            lambda query: _starts_with_any_phrase(query, selected_starts)
+        )
+        self.filtered_df = self._apply_filter(
+            f"{filter_name}(starts={selected_starts})",
+            keep_mask,
+        )
+        return self
+
     def _apply_filter(self, filter_name: str, mask: pd.Series) -> pd.DataFrame:
+        """Return a filtered copy and log the number of removed rows."""
         before = len(self.filtered_df)
         filtered = self.filtered_df.loc[mask].copy()
         after = len(filtered)
@@ -385,6 +455,7 @@ class QueryFilterPipeline:
         return filtered
 
     def _ensure_hits_parsed(self) -> None:
+        """Materialize normalized citation-hit lists when absent."""
         if "hits_parsed" in self.filtered_df.columns:
             return
 
@@ -392,6 +463,7 @@ class QueryFilterPipeline:
         self.filtered_df["hits_parsed"] = self.filtered_df["hits"].apply(parse_hits)
 
     def _ensure_n_sources(self) -> None:
+        """Materialize the number of unique references per source article."""
         if "n_sources" in self.filtered_df.columns:
             return
 
@@ -402,6 +474,7 @@ class QueryFilterPipeline:
         )
 
     def _ensure_query_length(self) -> None:
+        """Materialize or normalize query word counts."""
         if "query_length" in self.filtered_df.columns:
             self.filtered_df["query_length"] = (
                 pd.to_numeric(self.filtered_df["query_length"], errors="coerce")
@@ -414,6 +487,7 @@ class QueryFilterPipeline:
         self.filtered_df["query_length"] = self.filtered_df["query"].apply(_count_query_words)
 
     def _ensure_strangeness(self) -> None:
+        """Materialize or normalize the query strangeness score."""
         if "strangeness" in self.filtered_df.columns:
             self.filtered_df["strangeness"] = pd.to_numeric(
                 self.filtered_df["strangeness"],
@@ -425,6 +499,7 @@ class QueryFilterPipeline:
         self.filtered_df["strangeness"] = self.filtered_df["query"].apply(_compute_strangeness)
 
     def _ensure_self_citation(self) -> None:
+        """Materialize the number of positive documents that are self-citations."""
         if "self_citation" in self.filtered_df.columns:
             return
 
@@ -441,6 +516,7 @@ class QueryFilterPipeline:
         )
 
     def _ensure_explicit_spoiler(self) -> None:
+        """Materialize whether a query names an author of a positive document."""
         if "explicit_spoiler" in self.filtered_df.columns:
             return
 
@@ -456,6 +532,7 @@ class QueryFilterPipeline:
         self.filtered_df["explicit_spoiler"] = self.filtered_df["author_spoiling"]
 
     def _get_metadata_with_authors(self) -> pd.DataFrame:
+        """Return cached article metadata with normalized author names."""
         if self._metadata_with_authors is None:
             logger.info("Building normalized metadata author cache")
             self._metadata_with_authors = self.df_metainfo.assign(
@@ -464,6 +541,7 @@ class QueryFilterPipeline:
         return self._metadata_with_authors
 
     def _get_sources_with_authors(self) -> pd.DataFrame:
+        """Return cached references with normalized author names."""
         if self._sources_with_authors is None:
             logger.info("Building normalized source author cache")
             self._sources_with_authors = self.df_sources.assign(
@@ -472,6 +550,7 @@ class QueryFilterPipeline:
         return self._sources_with_authors
 
     def _get_cited_author_patterns(self) -> dict[str, re.Pattern[str] | None]:
+        """Return cached author-name patterns keyed by source PMCID."""
         if self._cited_author_patterns is None:
             logger.info("Building cited author pattern cache")
             cited_author_lookup = _build_cited_author_lookup(self._get_sources_with_authors())
@@ -482,6 +561,7 @@ class QueryFilterPipeline:
         return self._cited_author_patterns
 
     def _get_self_citation_lookup(self) -> dict[str, set[str]]:
+        """Return cached self-cited PMIDs keyed by source PMCID."""
         if self._self_citation_lookup is None:
             logger.info("Building self-citation lookup cache")
             self._self_citation_lookup = _build_self_citation_lookup(
@@ -491,18 +571,21 @@ class QueryFilterPipeline:
         return self._self_citation_lookup
 
     def _get_source_count_lookup(self) -> dict[str, int]:
+        """Return cached unique-reference counts keyed by source PMCID."""
         if self._source_count_lookup is None:
             logger.info("Building source-count lookup cache")
             self._source_count_lookup = _build_source_count_lookup(self.df_sources)
         return self._source_count_lookup
 
     def _invalidate_query_dependent_annotations(self) -> None:
+        """Drop annotations invalidated by editing query text."""
         for column in ("query_length", "strangeness", "author_spoiling", "explicit_spoiler"):
             if column in self.filtered_df.columns:
                 self.filtered_df = self.filtered_df.drop(columns=column)
 
 
 def normalize_author_name(author: str) -> str:
+    """Reduce an author name to surname followed by initials."""
     parts = [part for part in str(author).split() if part]
     if not parts:
         return ""
@@ -512,7 +595,8 @@ def normalize_author_name(author: str) -> str:
     return f"{surname} {initials}".strip()
 
 
-def parse_hits(raw_hits: Any) -> list[str]:
+def parse_hits(raw_hits: object) -> list[str]:
+    """Parse a serialized citation-hit list and normalize its PMIDs."""
     if isinstance(raw_hits, list):
         values = raw_hits
     elif pd.isna(raw_hits):
@@ -529,7 +613,8 @@ def parse_hits(raw_hits: Any) -> list[str]:
     return parsed_hits
 
 
-def _normalize_metadata_authors(raw_authors: Any) -> list[str]:
+def _normalize_metadata_authors(raw_authors: object) -> list[str]:
+    """Normalize an article-author list loaded from CSV."""
     if raw_authors is None:
         return []
 
@@ -547,7 +632,8 @@ def _normalize_metadata_authors(raw_authors: Any) -> list[str]:
     ]
 
 
-def _normalize_source_authors(raw_authors: Any) -> list[str]:
+def _normalize_source_authors(raw_authors: object) -> list[str]:
+    """Normalize comma-separated reference authors loaded from CSV."""
     if raw_authors is None:
         return []
 
@@ -563,6 +649,7 @@ def _normalize_source_authors(raw_authors: Any) -> list[str]:
 
 
 def _build_cited_author_lookup(df_sources: pd.DataFrame) -> dict[str, set[str]]:
+    """Collect cited-author surnames for each source article."""
     grouped = (
         df_sources[["source_pmcid", "author_normalized"]]
         .groupby("source_pmcid")["author_normalized"]
@@ -575,6 +662,7 @@ def _build_self_citation_lookup(
     df_sources: pd.DataFrame,
     df_metainfo: pd.DataFrame,
 ) -> dict[str, set[str]]:
+    """Collect self-cited PMIDs for each source article."""
     merged = pd.merge(
         df_sources[["pmid", "source_pmcid", "author_normalized"]],
         df_metainfo[["pmcid", "author_normalized"]],
@@ -602,6 +690,7 @@ def _build_self_citation_lookup(
 
 
 def _build_source_count_lookup(df_sources: pd.DataFrame) -> dict[str, int]:
+    """Count unique valid PMIDs for each source article."""
     valid_sources = (
         df_sources[["source_pmcid", "pmid"]]
         .assign(pmid=lambda frame: frame["pmid"].apply(_coerce_pmid))
@@ -613,6 +702,7 @@ def _build_source_count_lookup(df_sources: pd.DataFrame) -> dict[str, int]:
 
 
 def _collect_surnames(authors_per_reference: Iterable[list[str]]) -> set[str]:
+    """Collect unique surnames from grouped reference-author lists."""
     surnames: set[str] = set()
     for author_list in authors_per_reference:
         for author in author_list:
@@ -623,9 +713,10 @@ def _collect_surnames(authors_per_reference: Iterable[list[str]]) -> set[str]:
 
 
 def _contains_cited_author(
-    query: Any,
+    query: object,
     cited_author_pattern: re.Pattern[str] | None,
 ) -> bool:
+    """Return whether a query contains a cited-author surname."""
     if not isinstance(query, str) or cited_author_pattern is None:
         return False
 
@@ -635,6 +726,7 @@ def _contains_cited_author(
 def _compile_cited_author_pattern(
     cited_surnames: set[str],
 ) -> re.Pattern[str] | None:
+    """Compile one case-insensitive pattern for a set of surnames."""
     if not cited_surnames:
         return None
 
@@ -646,7 +738,8 @@ def _compile_cited_author_pattern(
     return re.compile(rf"\b(?:{'|'.join(parts)})\b", flags=re.IGNORECASE)
 
 
-def _coerce_pmid(value: Any) -> str | None:
+def _coerce_pmid(value: object) -> str | None:
+    """Normalize a CSV PMID value to a non-empty string."""
     if value is None or pd.isna(value):
         return None
 
@@ -671,7 +764,8 @@ def _coerce_pmid(value: Any) -> str | None:
     return value_str
 
 
-def _compute_strangeness(query: Any) -> float:
+def _compute_strangeness(query: object) -> float:
+    """Return the fraction of non-alphanumeric, non-space characters."""
     if not isinstance(query, str) or not query:
         return 1.0
 
@@ -679,14 +773,16 @@ def _compute_strangeness(query: Any) -> float:
     return strange_chars / len(query)
 
 
-def _count_query_words(query: Any) -> int:
+def _count_query_words(query: object) -> int:
+    """Count whitespace-delimited words in a string query."""
     if not isinstance(query, str):
         return 0
 
     return len(query.split())
 
 
-def _starts_with_any_phrase(query: Any, phrases: Iterable[str]) -> bool:
+def _starts_with_any_phrase(query: object, phrases: Iterable[str]) -> bool:
+    """Return whether a query starts with a complete phrase."""
     if not isinstance(query, str):
         return False
 
@@ -707,7 +803,8 @@ def _starts_with_any_phrase(query: Any, phrases: Iterable[str]) -> bool:
             return True
     return False
 
-def _cleanup_query_text(query: Any, connectives: Iterable[str]) -> Any:
+def _cleanup_query_text(query: object, connectives: Iterable[str]) -> object:
+    """Remove repeated leading connectives from a string query."""
     if not isinstance(query, str):
         return query
 
@@ -726,6 +823,7 @@ def _cleanup_query_text(query: Any, connectives: Iterable[str]) -> Any:
 
 
 def _matching_start_phrase(query: str, phrases: Iterable[str]) -> str | None:
+    """Return the longest phrase matching the start of a query."""
     query_stripped = query.strip()
     query_lower = query_stripped.lower()
     for phrase in sorted(
@@ -749,7 +847,8 @@ def _matching_start_phrase(query: str, phrases: Iterable[str]) -> str | None:
 def _build_source_reference_lookup(
     filtered_df: pd.DataFrame,
     df_sources: pd.DataFrame,
-) -> dict[Any, list[str]]:
+) -> dict[Hashable, list[str]]:
+    """Map each relevant source article to its unique reference PMIDs."""
     required_pmcs = filtered_df["source_pmcid"].dropna().drop_duplicates().tolist()
     source_refs = (
         df_sources[["source_pmcid", "pmid"]]
@@ -759,7 +858,7 @@ def _build_source_reference_lookup(
         .drop_duplicates()
     )
 
-    source_ref_lookup: dict[Any, list[str]] = {}
+    source_ref_lookup: dict[Hashable, list[str]] = {}
     for source_pmcid in required_pmcs:
         refs = source_refs.loc[source_refs["source_pmcid"].eq(source_pmcid), "pmid"].tolist()
         source_ref_lookup[source_pmcid] = list(dict.fromkeys(refs))
@@ -770,13 +869,13 @@ def _build_query_decoy_options(
     filtered_df: pd.DataFrame,
     df_sources: pd.DataFrame,
     n_required: int,
-) -> dict[Any, list[str]]:
+) -> dict[Hashable, list[str]]:
     """Build a mapping from query ID to list of decoy reference PMIDs that could be selected for that query."""
     if "hits_parsed" not in filtered_df.columns:
         raise ValueError("filtered_df must contain hits_parsed before decoy selection")
 
     source_ref_lookup = _build_source_reference_lookup(filtered_df, df_sources)
-    query_decoy_options: dict[Any, list[str]] = {}
+    query_decoy_options: dict[Hashable, list[str]] = {}
 
     for query_id, row in filtered_df.iterrows():
         source_pmcid = row["source_pmcid"]
@@ -792,11 +891,11 @@ def _build_query_decoy_options(
 
 
 def _select_shared_references_greedy(
-    query_hits: dict[Any, list[str]],
+    query_hits: dict[Hashable, list[str]],
     n_required: int,
 ) -> list[str]:
     """Select a set of reference PMIDs that covers at least n_required decoys for each query, reusing references globally when possible."""
-    ref_to_queries: dict[str, set[Any]] = {}
+    ref_to_queries: dict[str, set[Hashable]] = {}
     for query_id, hits in query_hits.items():
         for hit in hits:
             ref_to_queries.setdefault(hit, set()).add(query_id)
@@ -836,12 +935,12 @@ def _select_shared_references_greedy(
 
 
 def _prune_redundant_selected_references(
-    query_hits: dict[Any, list[str]],
+    query_hits: dict[Hashable, list[str]],
     selected_refs: list[str],
     n_required: int,
 ) -> set[str]:
     """Prune references from the selected set that are redundant, i.e. whose removal would still leave at least n_required decoys for every query."""
-    ref_to_queries: dict[str, set[Any]] = {}
+    ref_to_queries: dict[str, set[Hashable]] = {}
     for query_id, hits in query_hits.items():
         for hit in hits:
             ref_to_queries.setdefault(hit, set()).add(query_id)

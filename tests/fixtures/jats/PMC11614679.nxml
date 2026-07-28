@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<article xmlns="http://jats.nlm.nih.gov">
+  <front>
+    <article-meta>
+      <article-id pub-id-type="pmcid">PMC11614679</article-id>
+      <article-id pub-id-type="pmid">23010005</article-id>
+      <title-group><article-title>Fixture article on therapeutic resistance</article-title></title-group>
+      <contrib-group>
+        <contrib contrib-type="author"><name><surname>Nguyen</surname><given-names>Kim</given-names></name></contrib>
+      </contrib-group>
+      <abstract><p>A compact synthetic article used to test JATS parsing.</p></abstract>
+    </article-meta>
+  </front>
+  <body>
+    <sec>
+      <title>Results</title>
+      <p>Resistant cells retained pathway activity <xref ref-type="bibr" rid="R1">1</xref>.</p>
+    </sec>
+  </body>
+  <back>
+    <ref-list>
+      <ref id="R1">
+        <label>1</label>
+        <element-citation>
+          <person-group person-group-type="author"><name><surname>Rossi</surname><given-names>Luca</given-names></name></person-group>
+          <article-title>Pathway activity in resistant cells</article-title>
+          <source>Journal of Fixture Therapeutics</source>
+          <year>2024</year>
+          <pub-id pub-id-type="pmid">31000005</pub-id>
+          <pub-id pub-id-type="doi">10.1000/fixture.5</pub-id>
+        </element-citation>
+      </ref>
+    </ref-list>
+  </back>
+</article>

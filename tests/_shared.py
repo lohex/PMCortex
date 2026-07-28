@@ -9,7 +9,7 @@ EXAMPLE_PMCIDS = [
     "PMC11614679",
 ]
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "pmc_jats"
+DATA_DIR = Path(__file__).resolve().parent / "fixtures" / "jats"
 
 
 def existing_example_files() -> dict[str, Path]:

@@ -1,11 +1,14 @@
-import sys
+"""Parse PMC JATS XML into retrieval queries and cited documents."""
+
+from dataclasses import asdict
 import re
 from pathlib import Path
 from typing import Iterable
+
 from lxml import etree
 import pandas as pd
-import yaml
 from loguru import logger
+
 from pmcortex.models import JATSArticle, Reference, Context
 
 ABBREVIATIONS = {
@@ -57,22 +60,29 @@ class JATSParser:
         self.last_context = None
 
     def parse_article(
-            self, path: str | Path,
-            *,
-            save_sentences: bool = False,
-        ) -> JATSArticle:
+        self,
+        path: str | Path,
+        *,
+        pmcid: str | None = None,
+        save_sentences: bool = False,
+    ) -> JATSArticle:
         """
         Parse one article file and return a structured `JATSArticle`.
 
         Besides the returned dataclass, this method also populates parser state:
         `self.root`, `self.namespaces` and `self.contexts`.
         """
-        self.parse_tree(path)
-        title, abstract, pmcid, pmid = self.extract_metadata()
-        if pmcid is None:
-            pmcid = path.replace('.nxml', '')
-        self.pmcid = pmcid
-        logger.info(f"Parsed article {pmcid} with title '{title}'")
+        article_path = Path(path)
+        if not article_path.is_file():
+            raise FileNotFoundError(f"JATS article not found: {article_path}")
+
+        self.parse_tree(article_path)
+        title, abstract, extracted_pmcid, pmid = self.extract_metadata()
+        article_pmcid = extracted_pmcid
+        if article_pmcid is None:
+            article_pmcid = pmcid if pmcid is not None else article_path.stem
+        self.pmcid = article_pmcid
+        logger.info(f"Parsed article {article_pmcid} with title '{title}'")
 
         authors = self.extract_authors()        
         references = self.extract_references()
@@ -82,13 +92,12 @@ class JATSParser:
         self.extract_contexts(
             sections,
             references,
-            pmcid,
-            save_sentences=save_sentences
+            save_sentences=save_sentences,
         )
         logger.info(f"Extracted {len(self.contexts)} contexts from {path}.")
 
         self.article = JATSArticle(
-            pmcid=pmcid,
+            pmcid=article_pmcid,
             pmid=pmid,
             title=title,
             abstract=abstract,
@@ -99,7 +108,9 @@ class JATSParser:
 
         return self.article
     
-    def extract_metadata(self):
+    def extract_metadata(
+        self,
+    ) -> tuple[str | None, str | None, str | None, str | None]:
         """
         Extract core article-level metadata from the parsed JATS tree.
 
@@ -108,8 +119,7 @@ class JATSParser:
         PMCID values are normalized to start with the `PMC` prefix.
 
         Returns:
-            tuple[str | None, str | None, str | None]: A tuple containing
-            `(title, abstract, pmcid)`.
+            A tuple containing `(title, abstract, pmcid, pmid)`.
         """
         title_obj = self._find_element(".//j:article-meta//j:title-group//j:article-title")
         title = self._flatten_text(title_obj)
@@ -128,13 +138,12 @@ class JATSParser:
 
         return title, abstract, pmcid, pmid
 
-    def metadata_to_dataframe(self):
-        df = pd.DataFrame([{
-            name: getattr(self.article, name)
-            for name in dir(self.article)
-            if not name.startswith('__') and name not in ['references', 'sections']
-        }])
-        return df
+    def metadata_to_dataframe(self) -> pd.DataFrame:
+        """Return the current article metadata as a one-row DataFrame."""
+        metadata = asdict(self.article)
+        metadata.pop("references")
+        metadata.pop("sections")
+        return pd.DataFrame([metadata])
 
     # -----------------------
     # Author extraction
@@ -147,25 +156,15 @@ class JATSParser:
         """
         authors: list[str] = []
         for name in self.root.findall(".//j:article-meta//j:contrib-group//j:contrib[@contrib-type='author']//j:name", namespaces=self.namespaces):
-            surname = (name.findtext("j:surname", namespaces=self.namespaces) or "").strip()
-            given = (name.findtext("j:given-names", namespaces=self.namespaces) or "").strip()
-            if given and given.upper() != given:  # if given is not already initials:
-                given = "".join(
-                    part[0].upper()
-                    for part in re.findall(r"[A-Za-z]+", given)
-                    if part
-                )
+            author = self._extract_author_name(name)
+            if author:
+                authors.append(author)
 
-            full = " ".join(x for x in [surname, given] if x).strip()
-            if full:
-                authors.append(full)
-
-        # Sometimes authors are in <string-name>
         if not authors:
             for sn in self.root.findall(".//j:article-meta//j:contrib-group//j:contrib[@contrib-type='author']//j:string-name", namespaces=self.namespaces):
-                text = (sn.text or "").strip()
-                if text:
-                    authors.append(text)
+                author = self._extract_author_name(sn)
+                if author:
+                    authors.append(author)
 
         return authors
 
@@ -233,12 +232,7 @@ class JATSParser:
         
     def sources_to_dataframe(self) -> pd.DataFrame:
         """Convert extracted references to a pandas DataFrame."""
-        
-        df = pd.DataFrame([
-            {name: getattr(a, name) for name in dir(a) if not name.startswith('__')}
-            for a in self.article.references
-        ])
-        return df
+        return pd.DataFrame([asdict(reference) for reference in self.article.references])
 
 
     def _extract_authors(self, cit: etree._Element) -> list[str]:
@@ -249,40 +243,39 @@ class JATSParser:
         """
         authors: list[str] = []
         for name in cit.findall(".//j:name", namespaces=self.namespaces):
-            surname = (name.findtext("j:surname", namespaces=self.namespaces) or "").strip()
-            given = (name.findtext("j:given-names", namespaces=self.namespaces) or "").strip()
-            
-            if given and given.upper() != given:  # if given is not already initials
-                given = "".join(
-                    part[0].upper()
-                    for part in re.findall(r"[A-Za-z]+", given)
-                    if part
-                )
+            author = self._extract_author_name(name)
+            if author:
+                authors.append(author)
 
-            full = " ".join(x for x in [surname, given] if x).strip()
-            if full:
-                authors.append(full)
-
-        # Sometimes authors are in <string-name>
         if not authors:
             for sn in cit.findall(".//j:string-name", namespaces=self.namespaces):
-                surname = (sn.findtext("j:surname", namespaces=self.namespaces) or "").strip()
-                given = (sn.findtext("j:given-names", namespaces=self.namespaces) or "").strip()
-                if given and given.upper() != given:  # if given is not already initials
-                    given = "".join(
-                        part[0].upper()
-                        for part in re.findall(r"[A-Za-z]+", given)
-                        if part
+                author = self._extract_author_name(sn)
+                if author:
+                    authors.extend(
+                        part.strip() for part in author.split(",") if part.strip()
                     )
 
-                if not surname and not given:
-                    text_names = ''.join(list(sn.itertext()))
-                    text_names = re.sub(r'\s+', ' ', text_names).strip()
-                    if text_names:
-                        authors.append(text_names)
-
-        authors = ', '.join(authors)
         return authors
+
+    def _extract_author_name(self, element: etree._Element) -> str:
+        """Extract and normalize one structured or string author name."""
+        surname_text = element.findtext("j:surname", namespaces=self.namespaces)
+        given_text = element.findtext("j:given-names", namespaces=self.namespaces)
+        surname = "" if surname_text is None else surname_text.strip()
+        given = "" if given_text is None else given_text.strip()
+
+        if given and given.upper() != given:
+            given = "".join(
+                part[0].upper()
+                for part in re.findall(r"[A-Za-z]+", given)
+                if part
+            )
+
+        structured_name = " ".join(part for part in (surname, given) if part)
+        if structured_name:
+            return structured_name
+
+        return self._normalize_text("".join(element.itertext()))
 
     def _extract_pub_id(self, node: etree._Element, pub_id_type: str) -> str | None:
         """
@@ -356,6 +349,7 @@ class JATSParser:
         body_paragraphs: list[etree._Element] = []
 
         def flush_body_paragraphs() -> None:
+            """Append and clear paragraphs found directly under the body."""
             if not body_paragraphs:
                 return
             sections.append({
@@ -435,6 +429,7 @@ class JATSParser:
         current_parts: list[str] = []
 
         def flush_current() -> None:
+            """Append and clear the currently accumulated paragraph text."""
             text = self._normalize_text("".join(current_parts))
             current_parts.clear()
             if text:
@@ -479,7 +474,7 @@ class JATSParser:
         return paragraphs
 
     @staticmethod
-    def _replace_ref_ranges(in_string):
+    def _replace_ref_ranges(in_string: str) -> str:
         """
         Expand xref ranges into explicit xref markers.
 
@@ -498,8 +493,8 @@ class JATSParser:
 
         return in_string
 
-    #@staticmethod
-    def _clean_string(self, in_string: str):
+    @staticmethod
+    def _clean_string(in_string: str) -> str:
         """
         Split text into sentence-like chunks and normalize whitespace/punctuation.
 
@@ -520,8 +515,8 @@ class JATSParser:
         
         return out_string
 
-    #@staticmethod
-    def _split_sentences(self, text: str) -> list[str]:
+    @staticmethod
+    def _split_sentences(text: str) -> list[str]:
         """
         Split text by sentences at full stop avoiding splits at abreviations (e.g.) and within brackets.
         """
@@ -571,47 +566,29 @@ class JATSParser:
 
         return sentences
 
-    @staticmethod
-    def _split_string(in_string: str):
-        """
-        Split text by sentences at full stop avoiding splits at abreviations (e.g.). 
-        """
-        out_string_splitted = []
-        # alternatively use simple pattern: (?<=\.)\s+(?=[A-Z])
-        for out in re.split(r'(?<!\bfig)(?<!\be\.g)(?<!\bi\.e)(?<!\betc)(?<!\bvs)(?<=\.)\s+(?=[A-Z])', in_string):
-            out = out.strip()
-            if not out.endswith('.'):
-                out += '.'
-            out_string_splitted.append(out)
-
-        return out_string_splitted
-
-    #@staticmethod
     def _remove_and_keep_refs(
         self,
         in_string_list: list[str],
         ref_id_to_pmid: dict[str, str],
         section: int,
-        paragraph: int
-        ):
+        paragraph: int,
+    ) -> list[Context]:
         """
         Extract contexts that contain xref markers.
 
         Returns tuples of `(clean_query, refs)` where `clean_query` has xref
         placeholders removed and `refs` keeps the matched markers.
         """
-        contexts = []
-        for i, query in enumerate(in_string_list):
+        contexts: list[Context] = []
+        for query in in_string_list:
             refs = re.findall(r'\[xref:.*?\]', query)
             ref_list = [ref_id_to_pmid[ref] for ref in refs if ref in ref_id_to_pmid]
             if ref_list:
                 clean_query = re.sub(r' ?(\[xref:.*?\](, )?)+', '', query)
-                #prev_context = in_string_list[i-1] if i > 0 else ""
-                #prev_context = self.sentences[-1]
-                quey_words = len(clean_query.split(' '))
+                query_words = len(clean_query.split())
                 context = Context(
                     query=clean_query,
-                    query_length=quey_words,
+                    query_length=query_words,
                     hits=ref_list,
                     n_hits=len(ref_list),
                     context=self.last_context,
@@ -624,12 +601,11 @@ class JATSParser:
 
 
     def extract_contexts(
-            self,
-            sections: list,
-            references: list,
-            pmcid :str,
-            save_sentences: bool = False
-        ):
+        self,
+        sections: list[dict[str, object]],
+        references: list[Reference],
+        save_sentences: bool = False,
+    ) -> None:
         """
         Build reference contexts from parsed sections.
 
@@ -637,40 +613,37 @@ class JATSParser:
         `save_sentences` is `True`, also populates `self.sentences`.
         """
         
-        self.contexts = []
-        if save_sentences:
-            self.sentences = []
+        self.contexts: list[Context] = []
+        self.sentences: list[list[str]] = []
 
         pmid_replace = {f"[xref:{r.rid}]": r.pmid for r in references if r.pmid}
         for s, section in enumerate(sections):
-            for p,ref_paragraph in enumerate(section['paragraphs']):
+            paragraphs = section["paragraphs"]
+            if not isinstance(paragraphs, list):
+                continue
+            for p, ref_paragraph in enumerate(paragraphs):
                 for ref_text in self._replace_refs(ref_paragraph):
                     ref_text = self._replace_ref_ranges(ref_text)
                     ref_text = self._clean_string(ref_text)
-                    ref_text = self._split_sentences(ref_text) #_split_sentences(ref_text)
-                    #if save_sentences:
-                    self.sentences.append(ref_text)
-                    ref_contexts = self._remove_and_keep_refs(ref_text, pmid_replace, s, p)
+                    sentences = self._split_sentences(ref_text)
+                    if save_sentences:
+                        self.sentences.append(sentences)
+                    ref_contexts = self._remove_and_keep_refs(sentences, pmid_replace, s, p)
                     self.contexts.extend(ref_contexts)
-            self.last_context = None   
-        
-    def contexts_to_dataframe(self):
+            self.last_context = None
+
+    def contexts_to_dataframe(self) -> pd.DataFrame:
         """
         Convert extracted contexts into a tabular representation.
 
         Returns a DataFrame with query text, PMID hits, and basic query stats.
         """
-        df = pd.DataFrame([
-            {name: getattr(a, name) for name in dir(a) if not name.startswith('__')}
-            for a in self.contexts
-        ])
-        return df
+        return pd.DataFrame([asdict(context) for context in self.contexts])
 
-    def text_to_list(self):
+    def text_to_list(self) -> str:
         """
         Returns list of all extracted lines.
         """
-        # to remove refs also use re.sub(r' ?(\[xref:.*?\](, )?)+', '', line)
         lines = [
             re.sub(r'\(\s*\)', '', line)
             for paragraph in self.sentences

@@ -1,3 +1,5 @@
+"""Public API for PMCortex retrieval-dataset construction."""
+
 from loguru import logger
 import sys
 logger.remove()

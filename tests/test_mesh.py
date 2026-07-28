@@ -1,9 +1,12 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock
 
 from pmcortex.mesh import (
     PubMedMeSHClient,
     extract_abstracts_from_pubmed_xml,
+    extract_mesh_coarsest_descriptor_categories,
     extract_mesh_terms_from_pubmed_xml,
 )
 
@@ -56,6 +59,39 @@ PUBMED_XML = b"""
 
 
 class TestMeSHExtraction(unittest.TestCase):
+    def test_extract_descriptor_categories_requires_local_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            missing_path = Path(tmpdir) / "desc.xml"
+
+            with self.assertRaises(FileNotFoundError):
+                extract_mesh_coarsest_descriptor_categories(missing_path)
+
+            self.assertFalse(missing_path.exists())
+
+    def test_extract_descriptor_categories_filters_requested_level(self) -> None:
+        xml = """
+        <DescriptorRecordSet>
+          <DescriptorRecord>
+            <DescriptorUI>D000001</DescriptorUI>
+            <DescriptorName><String>Example</String></DescriptorName>
+            <TreeNumberList>
+              <TreeNumber>A01</TreeNumber>
+              <TreeNumber>A01.111</TreeNumber>
+            </TreeNumberList>
+          </DescriptorRecord>
+        </DescriptorRecordSet>
+        """
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "desc.xml"
+            path.write_text(xml)
+
+            categories = extract_mesh_coarsest_descriptor_categories(path, level=2)
+
+        self.assertEqual(
+            categories,
+            [{"ui": "D000001", "name": "Example", "tree_number": "A01.111"}],
+        )
+
     def test_extract_mesh_terms_with_qualifiers(self) -> None:
         df = extract_mesh_terms_from_pubmed_xml(PUBMED_XML)
 

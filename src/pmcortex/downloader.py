@@ -1,8 +1,11 @@
+"""Download PMC articles as local JATS XML files."""
+
 from pathlib import Path
 import random
 import re
 import time
-import sys
+from types import TracebackType
+
 import httpx
 from lxml import etree
 from loguru import logger
@@ -47,6 +50,19 @@ class PMCJATSDownloader:
             jitter_s (float): The random jitter added to backoff duration.
             overwrite (bool): Whether to overwrite existing files.
         """
+        if not user_agent.strip():
+            raise ValueError("user_agent must not be empty")
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        if min_interval_s < 0:
+            raise ValueError("min_interval_s must not be negative")
+        if max_retries <= 0:
+            raise ValueError("max_retries must be positive")
+        if backoff_base_s < 0:
+            raise ValueError("backoff_base_s must not be negative")
+        if jitter_s < 0:
+            raise ValueError("jitter_s must not be negative")
+
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -79,7 +95,12 @@ class PMCJATSDownloader:
         logger.info("Entering context manager")
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         """Exits the context manager and closes the HTTP client."""
         self.close()
         logger.info("Exiting context manager")
@@ -240,7 +261,6 @@ class PMCJATSDownloader:
         parser = etree.XMLParser(recover=True, resolve_entities=False, huge_tree=True)
         root = etree.fromstring(oai_xml, parser=parser)
 
-        # OAI error check
         err = root.find(".//{*}error")
         if err is not None:
             code = err.get("code")
@@ -304,7 +324,11 @@ class PMCJATSDownloader:
             logger.error(f"Unexpected error for {pmcid}: {repr(e)}")
             return DownloadResult(pmcid, None, "error", repr(e))
 
-    def download_many(self, pmcids: list[str], limit: int = None) -> list[DownloadResult]:
+    def download_many(
+        self,
+        pmcids: list[str],
+        limit: int | None = None,
+    ) -> list[DownloadResult]:
         """
         Downloads and extracts JATS XML for multiple PMC IDs.
 
@@ -315,10 +339,12 @@ class PMCJATSDownloader:
         Returns:
             list[DownloadResult]: A list of results for each download operation.
         """
-        results = []
-        for pmcid in pmcids:
-            if limit is not None and len(results) >= limit:
-                break
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
+
+        selected_pmcids = pmcids if limit is None else pmcids[:limit]
+        results: list[DownloadResult] = []
+        for pmcid in selected_pmcids:
             result = self.download_one(pmcid)
             result.log()
             results.append(result)

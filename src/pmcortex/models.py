@@ -1,58 +1,70 @@
+"""Data models shared by the PMC download and JATS parsing pipeline."""
+
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+
 from loguru import logger
 
 
-@dataclass(frozen=True)
-class DownloadResult:
-    """
-    Represents the result of a download operation.
+DownloadStatus = Literal["ok", "not_found", "no_fulltext", "error"]
 
-    Attributes:
-        pmcid (str): The PubMed Central ID of the article.
-        path (Path | None): The file path where the article is saved, or None if not applicable.
-        status (str): The status of the download (e.g., "ok", "not_found", "no_fulltext", "error").
-        message (str | None): Additional information about the download status.
-    """
+
+@dataclass(frozen=True, slots=True)
+class DownloadResult:
+    """Outcome of downloading one PMC article."""
+
     pmcid: str
     path: Path | None
-    status: str  # "ok" | "not_found" | "no_fulltext" | "error"
+    status: DownloadStatus
     message: str | None = None
 
-    def log(self):
-        """Logs the details of the download result using loguru."""
-        logger.info(f"DownloadResult - PMCID: {self.pmcid}, Status: {self.status}, Path: {self.path}, Message: {self.message}")
+    def log(self) -> None:
+        """Log the download outcome."""
+        logger.info(
+            "DownloadResult - PMCID: {}, Status: {}, Path: {}, Message: {}",
+            self.pmcid,
+            self.status,
+            self.path,
+            self.message,
+        )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Reference:
-    rid: str | None           # JATS ref id, e.g. "R12"
-    label: str | None         # JATS label, e.g. "1" if the reference is labeled "[1]", otherwise None
+    """Bibliographic reference extracted from a JATS article."""
+
+    rid: str | None
+    label: str | None
     doi: str | None
     pmid: str | None
     pmcid: str | None
-    year: str | None
+    year: int | None
     title: str | None
-    journal: str | None        # journal / book / etc.
-    authors: list[str]        # "Surname Given"
+    journal: str | None
+    authors: list[str]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JATSArticle:
+    """Structured content extracted from one JATS article."""
+
     pmcid: str | None
     pmid: str | None
     title: str | None
     abstract: str | None
-    authors: list[str]  # "Surname Given"
+    authors: list[str]
     references: list[Reference]
-    sections: dict[str, str]
+    sections: list[dict[str, object]]
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, slots=True)
 class Context:
+    """Retrieval query and cited positive documents extracted from a sentence."""
+
     query: str
     hits: list[str]
     query_length: int
     n_hits: int
-    # source_pmcid: int
-    context: str
+    context: str | None
     position: tuple[int, int]

@@ -1,4 +1,8 @@
+"""Fetch and extract PubMed abstracts, MeSH terms, and descriptor categories."""
+
 from collections.abc import Callable, Iterable
+from pathlib import Path
+import re
 import time
 
 from lxml import etree
@@ -21,6 +25,7 @@ class PubMedMeSHClient(HTTPContextManager):
         time_fn: Callable[[], float] | None = None,
         sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
+        """Create a rate-limited PubMed E-utilities client."""
         super().__init__(
             user_agent=user_agent,
             timeout_s=timeout_s,
@@ -30,8 +35,8 @@ class PubMedMeSHClient(HTTPContextManager):
             raise ValueError("max_requests_per_second must be positive")
 
         self._min_request_interval_s = 1.0 / max_requests_per_second
-        self._time_fn = time_fn or time.monotonic
-        self._sleep_fn = sleep_fn or time.sleep
+        self._time_fn = time.monotonic if time_fn is None else time_fn
+        self._sleep_fn = time.sleep if sleep_fn is None else sleep_fn
         self._next_request_not_before = 0.0
 
     def fetch_mesh_terms(
@@ -71,6 +76,7 @@ class PubMedMeSHClient(HTTPContextManager):
         return response.content
 
     def _wait_for_request_slot(self) -> None:
+        """Wait until the configured request interval has elapsed."""
         now = self._time_fn()
         if now < self._next_request_not_before:
             self._sleep_fn(self._next_request_not_before - now)
@@ -174,12 +180,6 @@ def extract_abstracts_from_pubmed_xml(xml: bytes | str) -> pd.DataFrame:
 
     return pd.DataFrame(rows, dtype=object)
 
-
-from lxml import etree
-from pathlib import Path
-import re
-import os
-
 def extract_mesh_coarsest_descriptor_categories(xml_path: str | Path, level: int = 2) -> list[dict[str, str]]:
     """
     Extract MeSH descriptors at the coarsest concrete level, e.g. A01, B01, C01.
@@ -189,32 +189,27 @@ def extract_mesh_coarsest_descriptor_categories(xml_path: str | Path, level: int
     - name
     - tree_number
     """
-    if not os.path.exists(xml_path):
-        # download the MeSH descriptor XML file if it doesn't exist
-        import requests
-        url = "https://nlmpubs.nlm.nih.gov/projects/mesh/MESH_FILES/xmlmesh/desc2026.xml"
-        request = requests.get(url)
-        with open(xml_path, "wb") as f:
-            f.write(request.content)
-    tree = etree.parse(str(xml_path))
-    root = tree.getroot()
-
-    results = []
-    seen = set()
-
     if level == 1:
-        pattern = re.compile(r"^[A-Z]\d{2}$") 
+        pattern = re.compile(r"^[A-Z]\d{2}$")
     elif level == 2:
         pattern = re.compile(r"^[A-Z]\d{2}\.\d{3}$")
     else:
-        raise ValueError("Unsupported level: {}".format(level))
+        raise ValueError(f"Unsupported level: {level}")
+
+    path = Path(xml_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"MeSH descriptor file not found: {path}")
+
+    root = etree.parse(path).getroot()
+    results: list[dict[str, str]] = []
+    seen: set[tuple[str | None, str]] = set()
 
     for desc in root.findall(".//DescriptorRecord"):
         ui = desc.findtext("DescriptorUI")
         name = desc.findtext("./DescriptorName/String")
 
         for tn in desc.findall(".//TreeNumberList/TreeNumber"):
-            tree_number = (tn.text or "").strip()
+            tree_number = "" if tn.text is None else tn.text.strip()
             if pattern.fullmatch(tree_number):
                 key = (ui, tree_number)
                 if key not in seen:

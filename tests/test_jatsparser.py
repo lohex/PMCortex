@@ -42,7 +42,7 @@ class TestJATSParser(unittest.TestCase):
         parser.parse_article(path, pmcid=pmcid)
         df = parser.contexts_to_dataframe()
 
-        expected = {"query", "hits", "query_length", "n_hits", "source", "context"}
+        expected = {"query", "hits", "query_length", "n_hits", "position", "context"}
         self.assertTrue(expected.issubset(set(df.columns)))
 
     def test_sources_to_dataframe_has_reference_fields(self) -> None:
@@ -51,7 +51,7 @@ class TestJATSParser(unittest.TestCase):
         parser.parse_article(path, pmcid=pmcid)
         df = parser.sources_to_dataframe()
 
-        expected = {"rid", "label", "doi", "pmid", "pmcid", "year", "title", "source", "authors"}
+        expected = {"rid", "label", "doi", "pmid", "pmcid", "year", "title", "journal", "authors"}
         self.assertTrue(expected.issubset(set(df.columns)))
 
     def test_split_sentences_does_not_split_inside_dotted_abbreviations(self) -> None:

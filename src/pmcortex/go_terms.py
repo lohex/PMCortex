@@ -1,3 +1,5 @@
+"""Extract selected terms from a local Gene Ontology OBO graph."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -81,5 +83,11 @@ def get_go_terms_up_to_level(
             }
         )
 
-    results.sort(key=lambda x: (x["namespace"] or "", int(x["level"] or 0), str(x["go_id"])))
+    results.sort(
+        key=lambda item: (
+            "" if item["namespace"] is None else str(item["namespace"]),
+            0 if item["level"] is None else int(item["level"]),
+            str(item["go_id"]),
+        )
+    )
     return results
