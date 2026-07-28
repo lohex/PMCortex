@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+uv.lock
+
+# Generated or downloaded datasets
+data/*/
+data/desc2026.xml
+*.log
+
+# Local editor and Codex configuration
+.codex
+.vscode/
+AGENTS.md
+AGENTS_DEVIATIONS.md
