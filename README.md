@@ -56,6 +56,7 @@ both positives and reusable hard negatives.
 - filter queries by citation count, length, self-citation, explicit answer
   leakage, and context-dependent wording
 - construct candidate pools and shared-reference decoy sets
+- discover PMC seed articles through NCBI ESearch and ESummary
 - download PMC articles as JATS/NXML through the OAI-PMH API
 - parse article metadata, bibliographies, sections, and citation contexts
 - fetch PubMed abstracts and MeSH assignments through NCBI E-utilities
@@ -71,7 +72,7 @@ both positives and reusable hard negatives.
 │   ├── downloader.py         # PMC JATS downloads through OAI-PMH
 │   ├── mesh.py               # PubMed abstracts and MeSH annotations
 │   ├── go_terms.py           # Gene Ontology OBO processing
-│   ├── pmcsearch.py          # basic PMC website search
+│   ├── pmcsearch.py          # PMC search through ESearch and ESummary
 │   └── models.py             # pipeline data classes
 ├── data/
 │   ├── desc2026.xml          # MeSH descriptor data
@@ -145,7 +146,15 @@ The resulting tables represent:
 - `sources`: documents in the source article's bibliography, including their
   DOI, PMID, and authors
 - `contexts`: sentence-derived queries and the bibliography references cited
-  by each query
+  by each query, together with `source_pmcid`, `section_index`,
+  `paragraph_index`, and `sentence_index`
+
+Generated full-text files contain one sentence per line. Every line starts
+with the same structural indices used by the query table:
+
+```text
+0/2/1	Sentence text...
+```
 
 For a given row in `contexts`, `hits` identifies the positive references.
 Other entries in `sources` from the same `source_pmcid` are potential hard
@@ -187,6 +196,52 @@ filter first needs them. `reset()` restores the unfiltered contexts.
 `select_shared_reference_subset(...)` can then select a controlled set of
 same-article references for use as decoys across multiple queries. Positive
 references are excluded from the corresponding query's negative options.
+
+### Filter cross-context coreferences
+
+The deterministic self-contained filter removes explicit document references,
+but deliberately keeps ambiguous pronouns. An optional second stage can remove
+only queries whose anaphoric mention resolves to the preceding context:
+
+```python
+import spacy
+from fastcoref import spacy_component
+
+from pmcortex import CrossContextCoreferenceFilter
+
+nlp = spacy.load("en_core_web_sm")
+nlp.add_pipe("fastcoref")
+
+coreference_filter = CrossContextCoreferenceFilter(nlp)
+filtered_queries = (
+    coreference_filter
+    .filter_cross_context_coreferences(queries)
+)
+```
+
+Model installation and configuration are explicit; the filter does not
+download language models or mutate the input DataFrame.
+
+### Discover PMC seed articles
+
+`PMCSearch.search()` returns its results directly as a DataFrame. `max_results`
+requests up to that many relevance-ordered records; fewer rows are returned
+when PMC has fewer matches.
+
+```python
+from pmcortex import PMCSearch
+
+with PMCSearch(
+    user_agent="MyProject/1.0 (contact: name@example.org)",
+) as search:
+    seeds = search.search("breast cancer", max_results=100)
+
+print(seeds[["pmcid", "title"]])
+```
+
+Search identifiers come from ESearch, and titles are fetched through ESummary
+in rate-limited batches. PMC ESearch supports at most 10,000 results for one
+query.
 
 ### Download PMC JATS files
 
