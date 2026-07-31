@@ -9,7 +9,7 @@ from lxml import etree
 import pandas as pd
 from loguru import logger
 
-from pmcortex.models import JATSArticle, Reference, Context
+from pmcortex.models import Context, JATSArticle, PositionedSentence, Reference
 
 ABBREVIATIONS = {
     "e.g.",
@@ -568,31 +568,32 @@ class JATSParser:
 
     def _remove_and_keep_refs(
         self,
-        in_string_list: list[str],
+        sentences: list[PositionedSentence],
         ref_id_to_pmid: dict[str, str],
-        section: int,
-        paragraph: int,
     ) -> list[Context]:
         """
         Extract contexts that contain xref markers.
 
-        Returns tuples of `(clean_query, refs)` where `clean_query` has xref
-        placeholders removed and `refs` keeps the matched markers.
+        Each context retains the structural position of its source sentence.
         """
         contexts: list[Context] = []
-        for query in in_string_list:
+        for sentence in sentences:
+            query = sentence.text
             refs = re.findall(r'\[xref:.*?\]', query)
             ref_list = [ref_id_to_pmid[ref] for ref in refs if ref in ref_id_to_pmid]
             if ref_list:
                 clean_query = re.sub(r' ?(\[xref:.*?\](, )?)+', '', query)
                 query_words = len(clean_query.split())
                 context = Context(
+                    source_pmcid=self.pmcid,
+                    section_index=sentence.section_index,
+                    paragraph_index=sentence.paragraph_index,
+                    sentence_index=sentence.sentence_index,
                     query=clean_query,
                     query_length=query_words,
                     hits=ref_list,
                     n_hits=len(ref_list),
                     context=self.last_context,
-                    position=(section, paragraph)
                 )
                 self.last_context = clean_query
                 contexts.append(context)
@@ -610,11 +611,11 @@ class JATSParser:
         Build reference contexts from parsed sections.
 
         Populates `self.contexts` with `(query, refs)` tuples. If
-        `save_sentences` is `True`, also populates `self.sentences`.
+        `save_sentences` is `True`, also populates positioned full-text sentences.
         """
         
         self.contexts: list[Context] = []
-        self.sentences: list[list[str]] = []
+        self.sentences: list[PositionedSentence] = []
 
         pmid_replace = {f"[xref:{r.rid}]": r.pmid for r in references if r.pmid}
         for s, section in enumerate(sections):
@@ -622,13 +623,24 @@ class JATSParser:
             if not isinstance(paragraphs, list):
                 continue
             for p, ref_paragraph in enumerate(paragraphs):
+                next_sentence_index = 0
                 for ref_text in self._replace_refs(ref_paragraph):
                     ref_text = self._replace_ref_ranges(ref_text)
                     ref_text = self._clean_string(ref_text)
-                    sentences = self._split_sentences(ref_text)
+                    sentence_texts = self._split_sentences(ref_text)
+                    sentences = [
+                        PositionedSentence(
+                            section_index=s,
+                            paragraph_index=p,
+                            sentence_index=next_sentence_index + index,
+                            text=sentence_text,
+                        )
+                        for index, sentence_text in enumerate(sentence_texts)
+                    ]
+                    next_sentence_index += len(sentences)
                     if save_sentences:
-                        self.sentences.append(sentences)
-                    ref_contexts = self._remove_and_keep_refs(sentences, pmid_replace, s, p)
+                        self.sentences.extend(sentences)
+                    ref_contexts = self._remove_and_keep_refs(sentences, pmid_replace)
                     self.contexts.extend(ref_contexts)
             self.last_context = None
 
@@ -641,13 +653,15 @@ class JATSParser:
         return pd.DataFrame([asdict(context) for context in self.contexts])
 
     def text_to_list(self) -> str:
-        """
-        Returns list of all extracted lines.
-        """
+        """Return positioned full-text sentences, one tab-separated line each."""
         lines = [
-            re.sub(r'\(\s*\)', '', line)
-            for paragraph in self.sentences
-            for line in paragraph
+            (
+                f"{sentence.section_index}/"
+                f"{sentence.paragraph_index}/"
+                f"{sentence.sentence_index}\t"
+                f"{re.sub(r'\\(\\s*\\)', '', sentence.text)}"
+            )
+            for sentence in self.sentences
         ]
         return '\n'.join(lines)
 

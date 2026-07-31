@@ -42,8 +42,70 @@ class TestJATSParser(unittest.TestCase):
         parser.parse_article(path, pmcid=pmcid)
         df = parser.contexts_to_dataframe()
 
-        expected = {"query", "hits", "query_length", "n_hits", "position", "context"}
+        expected = {
+            "source_pmcid",
+            "section_index",
+            "paragraph_index",
+            "sentence_index",
+            "query",
+            "hits",
+            "query_length",
+            "n_hits",
+            "context",
+        }
         self.assertTrue(expected.issubset(set(df.columns)))
+        self.assertTrue(df["source_pmcid"].eq(pmcid).all())
+        self.assertNotIn("position", df.columns)
+
+    def test_query_and_fulltext_share_structural_sentence_position(self) -> None:
+        parser = self._parser_from_xml(
+            """
+            <article xmlns="http://jats.nlm.nih.gov">
+              <body>
+                <sec>
+                  <p>
+                    First sentence. Cited sentence
+                    <xref ref-type="bibr" rid="R1">1</xref>.
+                  </p>
+                </sec>
+              </body>
+            </article>
+            """
+        )
+        parser.pmcid = "PMC_TEST"
+        sections = parser.extract_sections()
+        references = [
+            Reference(
+                rid="R1",
+                label="1",
+                doi=None,
+                pmid="12345",
+                pmcid=None,
+                year=None,
+                title=None,
+                journal=None,
+                authors=[],
+            )
+        ]
+
+        parser.extract_contexts(sections, references, save_sentences=True)
+
+        context = parser.contexts_to_dataframe().iloc[0]
+        self.assertEqual(context["source_pmcid"], "PMC_TEST")
+        self.assertEqual(context["section_index"], 0)
+        self.assertEqual(context["paragraph_index"], 0)
+        self.assertEqual(context["sentence_index"], 1)
+        self.assertEqual(
+            parser.text_to_list().splitlines(),
+            [
+                (
+                    "0/0/0\tFirst sentence."
+                ),
+                (
+                    "0/0/1\tCited sentence [xref:R1]."
+                ),
+            ],
+        )
 
     def test_sources_to_dataframe_has_reference_fields(self) -> None:
         pmcid, path = next(iter(existing_example_files().items()))

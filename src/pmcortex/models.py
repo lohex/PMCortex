@@ -59,12 +59,25 @@ class JATSArticle:
 
 
 @dataclass(frozen=True, slots=True)
+class PositionedSentence:
+    """One normalized full-text sentence with its structural article position."""
+
+    section_index: int
+    paragraph_index: int
+    sentence_index: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class Context:
     """Retrieval query and cited positive documents extracted from a sentence."""
 
+    source_pmcid: str
+    section_index: int
+    paragraph_index: int
+    sentence_index: int
     query: str
     hits: list[str]
     query_length: int
     n_hits: int
     context: str | None
-    position: tuple[int, int]
