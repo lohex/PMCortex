@@ -12,11 +12,14 @@ from .mesh import (
     extract_abstracts_from_pubmed_xml,
     extract_mesh_terms_from_pubmed_xml,
 )
-from .query_filters import QueryFilterPipeline
+from .pmcsearch import PMCSearch
+from .query_filters import CrossContextCoreferenceFilter, QueryFilterPipeline
 
 __all__ = [
     "JATSParser",
+    "PMCSearch",
     "PubMedMeSHClient",
+    "CrossContextCoreferenceFilter",
     "QueryFilterPipeline",
     "extract_abstracts_from_pubmed_xml",
     "extract_mesh_terms_from_pubmed_xml",

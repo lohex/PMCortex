@@ -3,12 +3,11 @@
 from collections.abc import Callable, Iterable
 from pathlib import Path
 import re
-import time
 
 from lxml import etree
 import pandas as pd
 
-from pmcortex.http_context_manager import HTTPContextManager
+from pmcortex.http_context_manager import HTTPContextManager, RequestRateLimiter
 
 
 class PubMedMeSHClient(HTTPContextManager):
@@ -26,18 +25,16 @@ class PubMedMeSHClient(HTTPContextManager):
         sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         """Create a rate-limited PubMed E-utilities client."""
+        self._rate_limiter = RequestRateLimiter(
+            max_requests_per_second,
+            time_fn=time_fn,
+            sleep_fn=sleep_fn,
+        )
         super().__init__(
             user_agent=user_agent,
             timeout_s=timeout_s,
             accept="application/xml,text/xml;q=0.9,*/*;q=0.1",
         )
-        if max_requests_per_second <= 0:
-            raise ValueError("max_requests_per_second must be positive")
-
-        self._min_request_interval_s = 1.0 / max_requests_per_second
-        self._time_fn = time.monotonic if time_fn is None else time_fn
-        self._sleep_fn = time.sleep if sleep_fn is None else sleep_fn
-        self._next_request_not_before = 0.0
 
     def fetch_mesh_terms(
         self,
@@ -63,7 +60,7 @@ class PubMedMeSHClient(HTTPContextManager):
         if not pmid_list:
             raise ValueError("pmids must contain at least one PMID.")
 
-        self._wait_for_request_slot()
+        self._rate_limiter.wait()
         response = self.client.post(
             self.EFETCH_URL,
             data={
@@ -74,15 +71,6 @@ class PubMedMeSHClient(HTTPContextManager):
         )
         response.raise_for_status()
         return response.content
-
-    def _wait_for_request_slot(self) -> None:
-        """Wait until the configured request interval has elapsed."""
-        now = self._time_fn()
-        if now < self._next_request_not_before:
-            self._sleep_fn(self._next_request_not_before - now)
-            now = self._time_fn()
-
-        self._next_request_not_before = now + self._min_request_interval_s
 
 
 def extract_mesh_terms_from_pubmed_xml(

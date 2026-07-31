@@ -1,9 +1,53 @@
 """Shared lifecycle management for synchronous HTTP clients."""
 
+from collections.abc import Callable
+import time
 from types import TracebackType
 from typing import Self
 
 import httpx
+
+
+class RequestRateLimiter:
+    """Space synchronous request starts by a configured minimum interval."""
+
+    def __init__(
+        self,
+        max_requests_per_second: float,
+        *,
+        time_fn: Callable[[], float] | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
+    ) -> None:
+        """
+        Configure the maximum request-start rate.
+
+        Args:
+            max_requests_per_second: Positive upper bound for request starts.
+            time_fn: Monotonic clock, injectable for deterministic tests.
+            sleep_fn: Blocking sleep function, injectable for deterministic tests.
+
+        Raises:
+            ValueError: If ``max_requests_per_second`` is not positive.
+
+        Notes:
+            This limiter is intended for sequential clients and is not thread-safe.
+        """
+        if max_requests_per_second <= 0:
+            raise ValueError("max_requests_per_second must be positive")
+
+        self._min_interval_s = 1.0 / max_requests_per_second
+        self._time_fn = time.monotonic if time_fn is None else time_fn
+        self._sleep_fn = time.sleep if sleep_fn is None else sleep_fn
+        self._next_request_not_before = 0.0
+
+    def wait(self) -> None:
+        """Block until the next request may start and reserve that slot."""
+        now = self._time_fn()
+        if now < self._next_request_not_before:
+            self._sleep_fn(self._next_request_not_before - now)
+            now = self._time_fn()
+
+        self._next_request_not_before = now + self._min_interval_s
 
 
 class HTTPContextManager:
