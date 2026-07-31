@@ -134,9 +134,104 @@ DEFAULT_SUMMARY_STARTS = (
     "generally speaking",
 )
 LOCAL_CONTEXT_REFERENCE_PATTERN = re.compile(
-    r"\b(?:figure|fig\.|table|section|appendix|supplementary\s+(?:figure|fig\.|table))\s+[a-z0-9ivx.-]+\b|\b(?:above|below)\b",
+    r"\b(?:figure|fig\.|table|section|appendix|supplementary\s+(?:figure|fig\.|table))\s+[a-z0-9ivx.-]+\b"
+    r"|\b(?:as\s+(?:described|discussed|mentioned|reported|shown)|see)\s+(?:above|below)\b",
     flags=re.IGNORECASE,
 )
+
+
+class CrossContextCoreferenceFilter:
+    """Remove queries with anaphoric mentions linked to their preceding context."""
+
+    def __init__(
+        self,
+        nlp: object,
+        *,
+        batch_size: int = 512,
+        query_markers: Iterable[str] = DEFAULT_ANAPHORIC_STARTS,
+    ) -> None:
+        """Configure the filter with a spaCy-compatible pipeline containing FastCoref."""
+        pipe = getattr(nlp, "pipe", None)
+        if not callable(pipe):
+            raise TypeError("nlp must provide a callable pipe method")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        markers = tuple(query_markers)
+        if not markers:
+            raise ValueError("query_markers must not be empty")
+
+        self._nlp = nlp
+        self.batch_size = batch_size
+        self.query_markers = markers
+
+    def filter_cross_context_coreferences(
+        self,
+        queries: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Return a copy without queries coreferentially linked to `context`."""
+        required_columns = {"context", "query"}
+        missing_columns = required_columns.difference(queries.columns)
+        if missing_columns:
+            missing = ", ".join(sorted(missing_columns))
+            raise ValueError(f"Missing coreference columns: {missing}")
+
+        candidates = [
+            (query_id, context, query)
+            for query_id, context, query in queries[
+                ["context", "query"]
+            ].itertuples()
+            if isinstance(context, str)
+            and context.strip()
+            and isinstance(query, str)
+            and query.strip()
+        ]
+        if not candidates:
+            return queries.copy()
+
+        texts = [f"{context} {query}" for _, context, query in candidates]
+        pipe = getattr(self._nlp, "pipe")
+        documents = list(pipe(texts, batch_size=self.batch_size))
+        if len(documents) != len(candidates):
+            raise RuntimeError("The NLP pipeline returned an unexpected document count")
+        dependent_query_ids = {
+            query_id
+            for document, (query_id, context, query) in zip(documents, candidates)
+            if self._depends_on_context(document, context, query)
+        }
+        return queries.drop(index=dependent_query_ids).copy()
+
+    def _depends_on_context(
+        self,
+        document: object,
+        context: str,
+        query: str,
+    ) -> bool:
+        """Return whether one coreference cluster crosses into the query."""
+        extension = getattr(document, "_", None)
+        clusters = getattr(extension, "coref_clusters", ())
+        if clusters is None:
+            return False
+        full_text = f"{context} {query}"
+        context_end = len(context)
+        query_start = context_end + 1
+
+        for cluster in clusters:
+            spans = [(int(start), int(end)) for start, end in cluster]
+            has_context_mention = any(end <= context_end for _, end in spans)
+            query_mentions = [
+                full_text[start:end]
+                for start, end in spans
+                if start >= query_start
+            ]
+            has_anaphoric_query_mention = any(
+                _starts_with_any_phrase(mention, self.query_markers)
+                for mention in query_mentions
+            )
+            if has_context_mention and has_anaphoric_query_mention:
+                return True
+
+        return False
 
 
 class QueryFilterPipeline:
@@ -321,9 +416,8 @@ class QueryFilterPipeline:
         )
 
     def filter_self_contained_queries(self) -> "QueryFilterPipeline":
-        """Remove queries that depend on preceding text or local document elements."""
+        """Remove explicit document links while leaving anaphora to Coreference."""
         starts = (
-            *DEFAULT_ANAPHORIC_STARTS,
             *DEFAULT_REFERENCE_FRAMING_STARTS,
             *DEFAULT_LOCAL_CONTEXT_STARTS,
         )
@@ -336,6 +430,20 @@ class QueryFilterPipeline:
         self.filtered_df = self._apply_filter(
             "filter_self_contained_queries",
             ~(starts_mask | local_reference_mask),
+        )
+        return self
+
+    def filter_cross_context_coreferences(
+        self,
+        coreference_filter: CrossContextCoreferenceFilter,
+    ) -> "QueryFilterPipeline":
+        """Remove queries whose anaphoric mentions resolve into `context`."""
+        filtered = coreference_filter.filter_cross_context_coreferences(
+            self.filtered_df
+        )
+        self.filtered_df = self._apply_filter(
+            "filter_cross_context_coreferences",
+            self.filtered_df.index.isin(filtered.index),
         )
         return self
 

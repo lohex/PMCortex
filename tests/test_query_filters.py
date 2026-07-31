@@ -3,7 +3,37 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from pmcortex.query_filters import QueryFilterPipeline
+from pmcortex.query_filters import CrossContextCoreferenceFilter, QueryFilterPipeline
+
+
+class _FakeCoreferenceExtensions:
+    def __init__(self, clusters: list[list[tuple[int, int]]]) -> None:
+        self.coref_clusters = clusters
+
+
+class _FakeCoreferenceDocument:
+    def __init__(self, clusters: list[list[tuple[int, int]]]) -> None:
+        self._ = _FakeCoreferenceExtensions(clusters)
+
+
+class _FakeCoreferencePipeline:
+    def __init__(
+        self,
+        clusters_by_document: list[list[list[tuple[int, int]]]],
+    ) -> None:
+        self.clusters_by_document = clusters_by_document
+
+    def pipe(
+        self,
+        texts: list[str],
+        *,
+        batch_size: int,
+    ) -> list[_FakeCoreferenceDocument]:
+        del texts, batch_size
+        return [
+            _FakeCoreferenceDocument(clusters)
+            for clusters in self.clusters_by_document
+        ]
 
 
 class TestQueryFilterPipeline(unittest.TestCase):
@@ -198,15 +228,47 @@ class TestQueryFilterPipeline(unittest.TestCase):
             pipeline.filter_self_contained_queries()
 
         remaining_queries = pipeline.filtered_df["query"].tolist()
-        self.assertNotIn("This finding suggests an effect.", remaining_queries)
-        self.assertNotIn("It can lead to certain complications.", remaining_queries)
-        self.assertNotIn("They were more resistant to treatment.", remaining_queries)
-        self.assertNotIn("The latter mechanism remained active.", remaining_queries)
+        self.assertIn("This finding suggests an effect.", remaining_queries)
+        self.assertIn("It can lead to certain complications.", remaining_queries)
+        self.assertIn("They were more resistant to treatment.", remaining_queries)
+        self.assertIn("The latter mechanism remained active.", remaining_queries)
         self.assertNotIn("According to prior work, the pathway remained active.", remaining_queries)
         self.assertNotIn("Figure 2 shows that cells were resistant.", remaining_queries)
         self.assertNotIn("Cells were resistant in Figure 2.", remaining_queries)
         self.assertIn("Clean biological statement.", remaining_queries)
         self.assertIn("Overall, the pathway remained active.", remaining_queries)
+        self.assertIn("Expression remained below the detection threshold.", remaining_queries)
+        self.assertIn("Values above 10 were excluded.", remaining_queries)
+
+    def test_cross_context_coreference_filter_removes_crossing_anaphora(self) -> None:
+        queries = pd.DataFrame(
+            [
+                {
+                    "context": "The MAPK pathway was activated.",
+                    "query": "This pathway promoted proliferation.",
+                },
+                {
+                    "context": "The assay measured protein abundance.",
+                    "query": "Expression remained below the detection threshold.",
+                },
+                {
+                    "context": None,
+                    "query": "This standalone query has no available context.",
+                },
+            ]
+        )
+        nlp = _FakeCoreferencePipeline(
+            clusters_by_document=[
+                [[(4, 16), (32, 44)]],
+                [],
+            ]
+        )
+
+        filtered = CrossContextCoreferenceFilter(
+            nlp
+        ).filter_cross_context_coreferences(queries)
+
+        self.assertEqual(filtered.index.tolist(), [1, 2])
 
     def test_filter_no_summary_starts_filters_discourse_summary_openings(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -475,6 +537,8 @@ class TestQueryFilterPipeline(unittest.TestCase):
                 {"query": "The latter mechanism remained active.", "hits": "[1016]", "n_hits": 1, "source_pmcid": "PMC1"},
                 {"query": "Figure 2 shows that cells were resistant.", "hits": "[1017]", "n_hits": 1, "source_pmcid": "PMC1"},
                 {"query": "Cells were resistant in Figure 2.", "hits": "[1018]", "n_hits": 1, "source_pmcid": "PMC1"},
+                {"query": "Expression remained below the detection threshold.", "hits": "[1019]", "n_hits": 1, "source_pmcid": "PMC1"},
+                {"query": "Values above 10 were excluded.", "hits": "[1020]", "n_hits": 1, "source_pmcid": "PMC1"},
             ]
         )
         df_contexts.to_csv(f"{tmpdir}/extracted_contexts.csv", index=False)
@@ -499,6 +563,8 @@ class TestQueryFilterPipeline(unittest.TestCase):
                 {"source_pmcid": "PMC1", "pmid": "1016", "authors": "Perez P"},
                 {"source_pmcid": "PMC1", "pmid": "1017", "authors": "Quinn Q"},
                 {"source_pmcid": "PMC1", "pmid": "1018", "authors": "Reed R"},
+                {"source_pmcid": "PMC1", "pmid": "1019", "authors": "Stone S"},
+                {"source_pmcid": "PMC1", "pmid": "1020", "authors": "Turner T"},
             ]
         )
         df_sources.to_csv(f"{tmpdir}/extracted_sources.csv", index=False)
