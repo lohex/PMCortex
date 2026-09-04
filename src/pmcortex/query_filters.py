@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from ast import literal_eval
 from collections.abc import Hashable, Iterable
+from dataclasses import dataclass
+from enum import StrEnum
 import heapq
 from pathlib import Path
 import re
@@ -14,6 +16,43 @@ from loguru import logger
 
 ET_AL_PATTERN = re.compile(r"\bet al\.", flags=re.IGNORECASE)
 NON_ALNUM_SPACE_PATTERN = re.compile(r"[^a-zA-Z0-9 ]")
+PARENTHETICAL_AUTHOR_YEAR_PATTERN = re.compile(
+    r"\((?=[^()\n]{0,240}\b(?:18|19|20)\d{2}[a-z]?\b)"
+    r"(?=[^()\n]{0,240}(?:[,;&]|\band\b|\bet\s+al\.))"
+    r"[^()\n]{1,240}\)",
+    flags=re.IGNORECASE,
+)
+NARRATIVE_AUTHOR_YEAR_PATTERN = re.compile(
+    r"\b[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’‐‑–-]+"
+    r"(?:\s+(?:et\s+al\.|and|&)\s*"
+    r"[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’‐‑–-]+)?"
+    r"\s*\(\s*(?:18|19|20)\d{2}[a-z]?\s*\)",
+)
+UNWRAPPED_AUTHOR_YEAR_PATTERN = re.compile(
+    r"\b[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’‐‑–-]+"
+    r"(?:\s+(?:et\s+al\.|and|&)\s*"
+    r"[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’‐‑–-]+)?"
+    r"\s*,\s*(?:18|19|20)\d{2}[a-z]?\b",
+)
+NUMERIC_CITATION_PATTERN = re.compile(
+    r"\[\s*\d{1,4}(?:[a-z])?"
+    r"(?:\s*(?:[,;/]|[-–—−]|\band\b)\s*\d{1,4}(?:[a-z])?)*\s*\]",
+    flags=re.IGNORECASE,
+)
+BIBLIOGRAPHIC_IDENTIFIER_PATTERN = re.compile(
+    r"\b(?:doi|pmid|pmcid)\s*:\s*(?:10\.)?[a-z0-9./_-]+",
+    flags=re.IGNORECASE,
+)
+NONPUBLIC_CITATION_PATTERN = re.compile(
+    r"\b(?:unpublished\s+data|personal\s+communication|in\s+press)\b",
+    flags=re.IGNORECASE,
+)
+EMPTY_CITATION_PLACEHOLDER_PATTERN = re.compile(
+    r"\(\s*(?:e\.g\.|i\.e\.)\s*,?\s*\)",
+    flags=re.IGNORECASE,
+)
+PUBLISHER_CITATION_ARTIFACT_PATTERN = re.compile(r"▸")
+INTERNAL_XREF_PATTERN = re.compile(r"\[xref:[^\]\s]+\]", flags=re.IGNORECASE)
 DEFAULT_ANAPHORIC_STARTS = (
     "this",
     "that",
@@ -138,6 +177,43 @@ LOCAL_CONTEXT_REFERENCE_PATTERN = re.compile(
     r"|\b(?:as\s+(?:described|discussed|mentioned|reported|shown)|see)\s+(?:above|below)\b",
     flags=re.IGNORECASE,
 )
+
+
+class CitationSpoilerReason(StrEnum):
+    """Closed set of reasons why a query exposes bibliographic information."""
+
+    POSITIVE_AUTHOR = "positive_author"
+    PARENTHETICAL_AUTHOR_YEAR = "parenthetical_author_year"
+    NARRATIVE_AUTHOR_YEAR = "narrative_author_year"
+    UNWRAPPED_AUTHOR_YEAR = "unwrapped_author_year"
+    ET_AL = "et_al"
+    NUMERIC_CITATION = "numeric_citation"
+    BIBLIOGRAPHIC_IDENTIFIER = "bibliographic_identifier"
+    NONPUBLIC_CITATION = "nonpublic_citation"
+    EMPTY_CITATION_PLACEHOLDER = "empty_citation_placeholder"
+    PUBLISHER_ARTIFACT = "publisher_artifact"
+    INTERNAL_XREF_MARKER = "internal_xref_marker"
+    INCOMPLETE_POSITIVE_AUTHOR_METADATA = "incomplete_positive_author_metadata"
+
+
+@dataclass(frozen=True, slots=True)
+class CitationSpoilerAssessment:
+    """Residual citation-spoiler assessment for one query string."""
+
+    is_spoiler: bool
+    reasons: tuple[CitationSpoilerReason, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CitationSpoilerFilterResult:
+    """Filtered benchmark rows and their auditable rejected complement."""
+
+    filtered: pd.DataFrame
+    rejected: pd.DataFrame
+
+
+class CitationSpoilerError(RuntimeError):
+    """Raised when a final benchmark export still contains citation spoilers."""
 
 
 class CrossContextCoreferenceFilter:
@@ -284,9 +360,12 @@ class QueryFilterPipeline:
 
         self.annotated_df = self.df_contexts.copy()
         self.filtered_df = self.df_contexts.copy()
+        self.citation_spoiler_audit = pd.DataFrame()
         self._metadata_with_authors: pd.DataFrame | None = None
         self._sources_with_authors: pd.DataFrame | None = None
-        self._cited_author_patterns: dict[str, re.Pattern[str] | None] | None = None
+        self._positive_author_patterns: (
+            dict[tuple[str, str], re.Pattern[str] | None] | None
+        ) = None
         self._self_citation_lookup: dict[str, set[str]] | None = None
         self._source_count_lookup: dict[str, int] | None = None
         logger.info(
@@ -297,6 +376,7 @@ class QueryFilterPipeline:
     def reset(self) -> "QueryFilterPipeline":
         """Restore the unfiltered contexts and return this pipeline."""
         self.filtered_df = self.df_contexts.copy()
+        self.citation_spoiler_audit = pd.DataFrame()
         logger.info("Reset filtered query set to {} rows", len(self.filtered_df))
         return self
 
@@ -319,13 +399,68 @@ class QueryFilterPipeline:
         return self
 
     def filter_no_explicit_spoilers(self) -> "QueryFilterPipeline":
-        """Remove queries that explicitly name an author of a cited paper."""
+        """Remove queries exposing positive authors or residual citation syntax."""
         self._ensure_explicit_spoiler()
         self.filtered_df = self._apply_filter(
             "filter_no_explicit_spoilers",
             ~self.filtered_df["explicit_spoiler"].fillna(False),
         )
         return self
+
+    def filter_no_citation_spoilers(self) -> "QueryFilterPipeline":
+        """Remove every query flagged by metadata or residual citation checks."""
+        self._ensure_explicit_spoiler()
+        spoiler_mask = self.filtered_df["citation_spoiler"].fillna(False)
+        audit_columns = [
+            column
+            for column in (
+                "source_pmcid",
+                "section_index",
+                "paragraph_index",
+                "sentence_index",
+                "query_raw",
+                "query",
+                "hits_parsed",
+                "citation_spoiler_reasons",
+                "positive_author_metadata_complete",
+            )
+            if column in self.filtered_df.columns
+        ]
+        self.citation_spoiler_audit = self.filtered_df.loc[
+            spoiler_mask,
+            audit_columns,
+        ].copy()
+        self.citation_spoiler_audit["rejection_stage"] = (
+            "filter_no_citation_spoilers"
+        )
+        self.filtered_df = self._apply_filter(
+            "filter_no_citation_spoilers",
+            ~spoiler_mask,
+        )
+        return self
+
+    def assert_no_citation_spoilers(self) -> "QueryFilterPipeline":
+        """Raise when the current result violates the no-spoiler invariant.
+
+        Returns:
+            This pipeline when no query contains a citation spoiler.
+
+        Raises:
+            CitationSpoilerError: If at least one current query is flagged.
+        """
+        self._ensure_explicit_spoiler()
+        spoiler_rows = self.filtered_df.loc[
+            self.filtered_df["citation_spoiler"].fillna(False),
+            ["query", "citation_spoiler_reasons"],
+        ]
+        if spoiler_rows.empty:
+            return self
+
+        examples = spoiler_rows.head(3).to_dict(orient="records")
+        raise CitationSpoilerError(
+            f"Refusing benchmark export with {len(spoiler_rows)} citation "
+            f"spoilers; examples={examples!r}"
+        )
 
     def filter_no_self_citations(self) -> "QueryFilterPipeline":
         """Remove queries whose cited papers include a self-citation."""
@@ -624,20 +759,44 @@ class QueryFilterPipeline:
         )
 
     def _ensure_explicit_spoiler(self) -> None:
-        """Materialize whether a query names an author of a positive document."""
+        """Materialize metadata and residual citation-spoiler assessments."""
         if "explicit_spoiler" in self.filtered_df.columns:
             return
 
-        cited_author_patterns = self._get_cited_author_patterns()
-        logger.info("Materializing author_spoiling/explicit_spoiler for {} rows", len(self.filtered_df))
-        self.filtered_df["author_spoiling"] = self.filtered_df.apply(
-            lambda row: _contains_cited_author(
+        self._ensure_hits_parsed()
+        positive_author_patterns = self._get_positive_author_patterns()
+        logger.info(
+            "Materializing citation-spoiler assessments for {} rows",
+            len(self.filtered_df),
+        )
+        assessments = self.filtered_df.apply(
+            lambda row: _assess_query_with_positive_authors(
                 row["query"],
-                cited_author_patterns.get(row["source_pmcid"]),
+                row["source_pmcid"],
+                row["hits_parsed"],
+                positive_author_patterns,
             ),
             axis=1,
         )
-        self.filtered_df["explicit_spoiler"] = self.filtered_df["author_spoiling"]
+        self.filtered_df["author_spoiling"] = assessments.apply(
+            lambda assessment: CitationSpoilerReason.POSITIVE_AUTHOR
+            in assessment.reasons
+        )
+        self.filtered_df["citation_spoiler"] = assessments.apply(
+            lambda assessment: assessment.is_spoiler
+        )
+        self.filtered_df["citation_spoiler_reasons"] = assessments.apply(
+            lambda assessment: [reason.value for reason in assessment.reasons]
+        )
+        self.filtered_df["positive_author_metadata_complete"] = self.filtered_df.apply(
+            lambda row: _positive_author_metadata_is_complete(
+                row["source_pmcid"],
+                row["hits_parsed"],
+                positive_author_patterns,
+            ),
+            axis=1,
+        )
+        self.filtered_df["explicit_spoiler"] = self.filtered_df["citation_spoiler"]
 
     def _get_metadata_with_authors(self) -> pd.DataFrame:
         """Return cached article metadata with normalized author names."""
@@ -657,16 +816,20 @@ class QueryFilterPipeline:
             )
         return self._sources_with_authors
 
-    def _get_cited_author_patterns(self) -> dict[str, re.Pattern[str] | None]:
-        """Return cached author-name patterns keyed by source PMCID."""
-        if self._cited_author_patterns is None:
-            logger.info("Building cited author pattern cache")
-            cited_author_lookup = _build_cited_author_lookup(self._get_sources_with_authors())
-            self._cited_author_patterns = {
-                pmcid: _compile_cited_author_pattern(surnames)
-                for pmcid, surnames in cited_author_lookup.items()
+    def _get_positive_author_patterns(
+        self,
+    ) -> dict[tuple[str, str], re.Pattern[str] | None]:
+        """Return cached author patterns keyed by source article and positive PMID."""
+        if self._positive_author_patterns is None:
+            logger.info("Building positive-document author pattern cache")
+            positive_author_lookup = _build_positive_author_lookup(
+                self._get_sources_with_authors()
+            )
+            self._positive_author_patterns = {
+                key: _compile_cited_author_pattern(surnames)
+                for key, surnames in positive_author_lookup.items()
             }
-        return self._cited_author_patterns
+        return self._positive_author_patterns
 
     def _get_self_citation_lookup(self) -> dict[str, set[str]]:
         """Return cached self-cited PMIDs keyed by source PMCID."""
@@ -687,18 +850,40 @@ class QueryFilterPipeline:
 
     def _invalidate_query_dependent_annotations(self) -> None:
         """Drop annotations invalidated by editing query text."""
-        for column in ("query_length", "strangeness", "author_spoiling", "explicit_spoiler"):
+        annotation_columns = (
+            "query_length",
+            "strangeness",
+            "author_spoiling",
+            "explicit_spoiler",
+            "citation_spoiler",
+            "citation_spoiler_reasons",
+            "positive_author_metadata_complete",
+        )
+        for column in annotation_columns:
             if column in self.filtered_df.columns:
                 self.filtered_df = self.filtered_df.drop(columns=column)
 
 
 def normalize_author_name(author: str) -> str:
-    """Reduce an author name to surname followed by initials."""
-    parts = [part for part in str(author).split() if part]
+    """Reduce an author name to a clean surname followed by initials.
+
+    Args:
+        author: One author name in surname-first JATS order.
+
+    Returns:
+        Normalized surname and compact initials, or an empty string.
+
+    Raises:
+        TypeError: If ``author`` is not a string.
+    """
+    if not isinstance(author, str):
+        raise TypeError("author must be a string")
+
+    parts = [part for part in author.split() if part]
     if not parts:
         return ""
 
-    surname = parts[0]
+    surname = parts[0].strip("[]'\"")
     initials = "".join(part[0] for part in parts[1:] if part)
     return f"{surname} {initials}".strip()
 
@@ -723,44 +908,73 @@ def parse_hits(raw_hits: object) -> list[str]:
 
 def _normalize_metadata_authors(raw_authors: object) -> list[str]:
     """Normalize an article-author list loaded from CSV."""
-    if raw_authors is None:
-        return []
-
-    if isinstance(raw_authors, float) and pd.isna(raw_authors):
-        return []
-
-    values = raw_authors
-    if isinstance(values, str):
-        values = literal_eval(values)
-
     return [
         normalized
-        for normalized in (normalize_author_name(author) for author in values)
+        for normalized in (
+            normalize_author_name(author)
+            for author in _parse_author_values(raw_authors)
+        )
         if normalized
     ]
 
 
 def _normalize_source_authors(raw_authors: object) -> list[str]:
-    """Normalize comma-separated reference authors loaded from CSV."""
+    """Normalize reference authors loaded from a serialized CSV field."""
+    return _normalize_metadata_authors(raw_authors)
+
+
+def _parse_author_values(raw_authors: object) -> list[str]:
+    """Parse list-serialized or legacy comma-separated author values."""
     if raw_authors is None:
         return []
 
     if isinstance(raw_authors, float) and pd.isna(raw_authors):
         return []
 
-    authors = [author.strip() for author in str(raw_authors).split(",")]
-    return [
-        normalized
-        for normalized in (normalize_author_name(author) for author in authors)
-        if normalized
-    ]
+    values: object = raw_authors
+    if isinstance(raw_authors, str):
+        serialized = raw_authors.strip()
+        if not serialized:
+            return []
+        is_serialized_collection = serialized.startswith(("[", "("))
+        if is_serialized_collection:
+            try:
+                values = literal_eval(serialized)
+            except (SyntaxError, ValueError) as error:
+                raise ValueError("invalid serialized author list") from error
+        else:
+            values = [part.strip() for part in serialized.split(",")]
+
+    if not isinstance(values, (list, tuple)):
+        raise TypeError("authors must be a list, tuple, or serialized string")
+
+    authors: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise TypeError("author entries must be strings")
+        normalized = value.strip()
+        if normalized:
+            authors.append(normalized)
+    return authors
 
 
-def _build_cited_author_lookup(df_sources: pd.DataFrame) -> dict[str, set[str]]:
-    """Collect cited-author surnames for each source article."""
+def _build_positive_author_lookup(
+    df_sources: pd.DataFrame,
+) -> dict[tuple[str, str], set[str]]:
+    """Collect author surnames for each source-article/reference pair."""
+    normalized_sources = df_sources[[
+        "source_pmcid",
+        "pmid",
+        "author_normalized",
+    ]].copy()
+    normalized_sources["pmid"] = normalized_sources["pmid"].apply(_coerce_pmid)
+    normalized_sources = normalized_sources.dropna(
+        subset=["source_pmcid", "pmid"]
+    )
     grouped = (
-        df_sources[["source_pmcid", "author_normalized"]]
-        .groupby("source_pmcid")["author_normalized"]
+        normalized_sources.groupby(["source_pmcid", "pmid"])[
+            "author_normalized"
+        ]
         .agg(_collect_surnames)
     )
     return grouped.to_dict()
@@ -829,6 +1043,285 @@ def _contains_cited_author(
         return False
 
     return bool(cited_author_pattern.search(query))
+
+
+def assess_residual_citation_spoiler(query: str) -> CitationSpoilerAssessment:
+    """Detect high-confidence bibliographic residue in one query.
+
+    Args:
+        query: Final or intermediate retrieval-query text.
+
+    Returns:
+        Immutable spoiler flag and all matched reason categories.
+
+    Raises:
+        TypeError: If ``query`` is not a string.
+    """
+    if not isinstance(query, str):
+        raise TypeError("query must be a string")
+
+    reasons: list[CitationSpoilerReason] = []
+    if PARENTHETICAL_AUTHOR_YEAR_PATTERN.search(query):
+        reasons.append(CitationSpoilerReason.PARENTHETICAL_AUTHOR_YEAR)
+    elif NARRATIVE_AUTHOR_YEAR_PATTERN.search(query):
+        reasons.append(CitationSpoilerReason.NARRATIVE_AUTHOR_YEAR)
+    elif UNWRAPPED_AUTHOR_YEAR_PATTERN.search(query):
+        reasons.append(CitationSpoilerReason.UNWRAPPED_AUTHOR_YEAR)
+
+    reason_patterns = (
+        (CitationSpoilerReason.ET_AL, ET_AL_PATTERN),
+        (CitationSpoilerReason.NUMERIC_CITATION, NUMERIC_CITATION_PATTERN),
+        (
+            CitationSpoilerReason.BIBLIOGRAPHIC_IDENTIFIER,
+            BIBLIOGRAPHIC_IDENTIFIER_PATTERN,
+        ),
+        (
+            CitationSpoilerReason.NONPUBLIC_CITATION,
+            NONPUBLIC_CITATION_PATTERN,
+        ),
+        (
+            CitationSpoilerReason.EMPTY_CITATION_PLACEHOLDER,
+            EMPTY_CITATION_PLACEHOLDER_PATTERN,
+        ),
+        (
+            CitationSpoilerReason.PUBLISHER_ARTIFACT,
+            PUBLISHER_CITATION_ARTIFACT_PATTERN,
+        ),
+        (
+            CitationSpoilerReason.INTERNAL_XREF_MARKER,
+            INTERNAL_XREF_PATTERN,
+        ),
+    )
+    reasons.extend(
+        reason for reason, pattern in reason_patterns if pattern.search(query)
+    )
+    return CitationSpoilerAssessment(
+        is_spoiler=bool(reasons),
+        reasons=tuple(reasons),
+    )
+
+
+def assert_no_residual_citation_spoilers(
+    queries: pd.DataFrame,
+    *,
+    query_column: str = "query",
+) -> None:
+    """Enforce the final no-residual-citation invariant for a table.
+
+    Args:
+        queries: Candidate benchmark rows.
+        query_column: Column containing query strings.
+
+    Raises:
+        TypeError: If ``queries`` is not a DataFrame or the column name is invalid.
+        ValueError: If the requested query column is absent or contains non-strings.
+        CitationSpoilerError: If at least one query contains a residual spoiler.
+    """
+    if not isinstance(queries, pd.DataFrame):
+        raise TypeError("queries must be a pandas DataFrame")
+    if not isinstance(query_column, str):
+        raise TypeError("query_column must be a string")
+    if not query_column.strip():
+        raise ValueError("query_column must not be empty")
+    if query_column not in queries.columns:
+        raise ValueError(f"Missing query column: {query_column}")
+
+    invalid_mask = ~queries[query_column].apply(lambda value: isinstance(value, str))
+    if invalid_mask.any():
+        raise ValueError("query column must contain only strings")
+
+    assessments = queries[query_column].apply(assess_residual_citation_spoiler)
+    spoiler_mask = assessments.apply(lambda assessment: assessment.is_spoiler)
+    if not spoiler_mask.any():
+        return
+
+    examples = [
+        {
+            "index": index,
+            "query": queries.at[index, query_column],
+            "reasons": [reason.value for reason in assessments.at[index].reasons],
+        }
+        for index in queries.index[spoiler_mask][:3]
+    ]
+    raise CitationSpoilerError(
+        f"Refusing benchmark export with {int(spoiler_mask.sum())} residual "
+        f"citation spoilers; examples={examples!r}"
+    )
+
+
+def filter_citation_spoilers(
+    queries: pd.DataFrame,
+    sources: pd.DataFrame,
+    *,
+    query_column: str = "query",
+    hits_column: str = "hits_parsed",
+    source_column: str = "source_pmcid",
+    require_complete_author_metadata: bool = False,
+) -> CitationSpoilerFilterResult:
+    """Filter an existing benchmark with residual and positive-author checks.
+
+    Args:
+        queries: Existing benchmark rows to assess without mutation.
+        sources: Reference metadata containing source PMCID, PMID, and authors.
+        query_column: Query-text column in ``queries``.
+        hits_column: Serialized or materialized positive-PMID column in ``queries``.
+        source_column: Source-article column shared by both tables.
+        require_complete_author_metadata: Reject rows whose positive-reference
+            authors cannot all be checked. This is recommended for legacy data
+            lacking structural citation-cleanup metadata.
+
+    Returns:
+        Independent filtered and rejected DataFrames with audit annotations.
+
+    Raises:
+        TypeError: If either table or a column-name argument has the wrong type.
+        ValueError: If required columns are absent or author fields are malformed.
+    """
+    if not isinstance(queries, pd.DataFrame):
+        raise TypeError("queries must be a pandas DataFrame")
+    if not isinstance(sources, pd.DataFrame):
+        raise TypeError("sources must be a pandas DataFrame")
+    if not isinstance(require_complete_author_metadata, bool):
+        raise TypeError("require_complete_author_metadata must be a bool")
+    column_names = (query_column, hits_column, source_column)
+    if any(not isinstance(column, str) for column in column_names):
+        raise TypeError("column names must be strings")
+    if any(not column.strip() for column in column_names):
+        raise ValueError("column names must not be empty")
+
+    missing_query_columns = {
+        query_column,
+        hits_column,
+        source_column,
+    }.difference(queries.columns)
+    if missing_query_columns:
+        missing = ", ".join(sorted(missing_query_columns))
+        raise ValueError(f"Missing query columns: {missing}")
+    missing_source_columns = {
+        source_column,
+        "pmid",
+        "authors",
+    }.difference(sources.columns)
+    if missing_source_columns:
+        missing = ", ".join(sorted(missing_source_columns))
+        raise ValueError(f"Missing source columns: {missing}")
+
+    normalized_sources = sources.assign(
+        author_normalized=sources["authors"].apply(_normalize_source_authors)
+    )
+    positive_author_lookup = _build_positive_author_lookup(normalized_sources)
+    positive_author_patterns = {
+        key: _compile_cited_author_pattern(surnames)
+        for key, surnames in positive_author_lookup.items()
+    }
+
+    annotated = queries.copy()
+    parsed_hits = annotated[hits_column].apply(parse_hits)
+    assessments = pd.Series(
+        (
+            _assess_query_with_positive_authors(
+                query,
+                source_pmcid,
+                hit_pmids,
+                positive_author_patterns,
+            )
+            for query, source_pmcid, hit_pmids in zip(
+                annotated[query_column],
+                annotated[source_column],
+                parsed_hits,
+            )
+        ),
+        index=annotated.index,
+    )
+    annotated["citation_spoiler"] = assessments.apply(
+        lambda assessment: assessment.is_spoiler
+    )
+    annotated["citation_spoiler_reasons"] = assessments.apply(
+        lambda assessment: [reason.value for reason in assessment.reasons]
+    )
+    annotated["positive_author_metadata_complete"] = [
+        _positive_author_metadata_is_complete(
+            source_pmcid,
+            hit_pmids,
+            positive_author_patterns,
+        )
+        for source_pmcid, hit_pmids in zip(
+            annotated[source_column],
+            parsed_hits,
+        )
+    ]
+
+    if require_complete_author_metadata:
+        incomplete_metadata_mask = ~annotated[
+            "positive_author_metadata_complete"
+        ]
+        annotated.loc[incomplete_metadata_mask, "citation_spoiler"] = True
+        annotated.loc[
+            incomplete_metadata_mask,
+            "citation_spoiler_reasons",
+        ] = annotated.loc[
+            incomplete_metadata_mask,
+            "citation_spoiler_reasons",
+        ].apply(
+            lambda reasons: [
+                *reasons,
+                CitationSpoilerReason.INCOMPLETE_POSITIVE_AUTHOR_METADATA.value,
+            ]
+        )
+
+    spoiler_mask = annotated["citation_spoiler"]
+    rejected = annotated.loc[spoiler_mask].copy()
+    rejected["rejection_stage"] = "filter_citation_spoilers"
+    filtered = annotated.loc[~spoiler_mask].copy()
+    assert_no_residual_citation_spoilers(filtered, query_column=query_column)
+    return CitationSpoilerFilterResult(filtered=filtered, rejected=rejected)
+
+
+def _assess_query_with_positive_authors(
+    query: object,
+    source_pmcid: object,
+    positive_pmids: Iterable[str],
+    positive_author_patterns: dict[tuple[str, str], re.Pattern[str] | None],
+) -> CitationSpoilerAssessment:
+    """Combine residual syntax checks with query-specific positive authors."""
+    if not isinstance(query, str):
+        return CitationSpoilerAssessment(is_spoiler=False, reasons=())
+
+    residual = assess_residual_citation_spoiler(query)
+    reasons = list(residual.reasons)
+    if isinstance(source_pmcid, str):
+        contains_positive_author = any(
+            _contains_cited_author(
+                query,
+                positive_author_patterns.get((source_pmcid, pmid)),
+            )
+            for pmid in positive_pmids
+        )
+        if contains_positive_author:
+            reasons.insert(0, CitationSpoilerReason.POSITIVE_AUTHOR)
+
+    unique_reasons = tuple(dict.fromkeys(reasons))
+    return CitationSpoilerAssessment(
+        is_spoiler=bool(unique_reasons),
+        reasons=unique_reasons,
+    )
+
+
+def _positive_author_metadata_is_complete(
+    source_pmcid: object,
+    positive_pmids: Iterable[str],
+    positive_author_patterns: dict[tuple[str, str], re.Pattern[str] | None],
+) -> bool:
+    """Return whether every positive document has at least one parsed author."""
+    if not isinstance(source_pmcid, str):
+        return False
+    pmids = tuple(positive_pmids)
+    if not pmids:
+        return False
+    return all(
+        positive_author_patterns.get((source_pmcid, pmid)) is not None
+        for pmid in pmids
+    )
 
 
 def _compile_cited_author_pattern(

@@ -123,6 +123,21 @@ The benchmark CSV files contain later processing stages, including filtered
 queries and alternative decoy constructions. They allow work on filtering and
 evaluation without downloading and parsing all source articles again.
 
+New builds use recoverable per-article storage before producing these combined
+tables:
+
+```text
+pmc_context_queries_v1/
+├── xml_jats/                 # temporary or retained parser inputs
+├── parsed/PMC.../            # metadata, sources, and contexts per article
+├── fulltexts/PMC....txt      # positioned sentences
+├── authors/PMC....yaml
+├── status/PMC....json        # success or failure reason per article
+├── extracted_metadata.csv    # materialized combined tables
+├── extracted_sources.csv
+└── extracted_contexts.csv
+```
+
 ## Quick start
 
 ### Parse an article into retrieval data
@@ -174,8 +189,7 @@ pipeline = QueryFilterPipeline("data/pmc_context_queries_v0-5")
 (
     pipeline
     .filter_min_hit_queries(1)
-    .filter_no_et_al_queries()
-    .filter_no_explicit_spoilers()
+    .filter_no_citation_spoilers()
     .filter_no_self_citations()
     .filter_min_source_count(2)
     .filter_min_query_length(8)
@@ -184,6 +198,8 @@ pipeline = QueryFilterPipeline("data/pmc_context_queries_v0-5")
     .filter_no_reference_framing_starts()
     .filter_no_summary_starts()
 )
+
+pipeline.assert_no_citation_spoilers()
 
 queries = pipeline.filtered_df
 print(queries[["query", "hits"]].head())
@@ -243,23 +259,61 @@ Search identifiers come from ESearch, and titles are fetched through ESummary
 in rate-limited batches. PMC ESearch supports at most 10,000 results for one
 query.
 
-### Download PMC JATS files
+### Download and parse PMC articles
 
 ```python
+from pathlib import Path
+
+from pmcortex import PMCIngestionPipeline
 from pmcortex.downloader import PMCJATSDownloader
 
+dataset_root = Path("data/pmc_context_queries_v1")
 with PMCJATSDownloader(
-    "data/pmc_jats",
+    dataset_root / "xml_jats",
     user_agent="MyProject/1.0 (contact: name@example.org)",
 ) as downloader:
-    results = downloader.download_many(["PMC5513360", "PMC11587633"])
+    ingestion = PMCIngestionPipeline(
+        dataset_root,
+        downloader,
+        parser_workers=4,
+        delete_jats_after_success=True,
+        parser_schema_version="citation-normalization-v3-no-spoilers",
+        verbose=False,
+    )
+    records = ingestion.run(["PMC5513360", "PMC11587633"])
+    tables = ingestion.materialize_tables()
 
-for result in results:
-    print(result.pmcid, result.status, result.path)
+for record in records:
+    print(record.pmcid, record.status, record.reason)
 ```
 
-Existing files are reused by default. The downloader applies request-rate
-limiting and retries temporary failures with exponential backoff.
+The downloader remains serial so its NCBI rate limit applies globally within
+the run, while already downloaded articles are parsed in a bounded process
+pool. Per-article files are written atomically by the main process and the
+combined tables are rebuilt from complete shards.
+
+With `delete_jats_after_success=True`, a JATS file is removed only after its
+metadata, sources, contexts, positioned full text, author data, and successful
+status record have all been stored. Parser and persistence failures keep the
+JATS input for diagnosis and retry. Cleanup is disabled by default.
+
+Every outcome is independently auditable under `status/`. The JSON `status`
+is one of `complete`, `not_found`, `no_fulltext`, `download_error`,
+`parse_error`, or `persist_error`; `reason` contains the concrete error. The
+same information is available programmatically:
+
+```python
+failed = [
+    record
+    for record in ingestion.list_status_records()
+    if record.status != "complete"
+]
+```
+
+Calling `run()` again reuses complete artifacts even when their JATS sources
+were deleted. Changing `parser_schema_version` invalidates old outputs; the
+missing source is then downloaded and parsed again. `parse_available()` parses
+only local JATS files and performs no network requests.
 
 ### Fetch abstracts and MeSH annotations
 
@@ -326,10 +380,10 @@ requiring downloaded PMC articles.
 - `JATSParser` is a local parser and does not perform network requests.
 - JATS documents vary in structure, so the parser uses fault-tolerant XML
   processing.
-- Runtime information is written through `loguru` to
-  `logs/pmcortex.log`.
-- `pmcsearch.py` parses the PMC website's HTML and is therefore more sensitive
-  to website changes than the API-based components.
+- Ingestion shows one progress bar. Set `verbose=True` for detailed pipeline
+  messages; runtime logs are also written to `logs/pmcortex.log`.
+- `PMCSearch` uses the PMC ESearch and ESummary APIs with rate limiting and
+  retries; PMC may still return fewer rows than requested for a query.
 
 ## Project status
 

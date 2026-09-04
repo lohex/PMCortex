@@ -10,6 +10,10 @@ import pandas as pd
 from pmcortex.http_context_manager import HTTPContextManager, RequestRateLimiter
 
 
+class PMCSearchResponseError(RuntimeError):
+    """Raised when NCBI returns an unusable or explicit E-utilities error."""
+
+
 class PMCSearch(HTTPContextManager):
     """Search PMC with ESearch and retrieve matching titles with ESummary."""
 
@@ -105,33 +109,102 @@ class PMCSearch(HTTPContextManager):
 
     def _search_pmc_uids(self, query: str, max_results: int) -> list[str]:
         """Retrieve relevance-ordered PMC UIDs from ESearch."""
-        response = self._post_with_retries(
-            self.ESEARCH_URL,
-            data={
-                "db": "pmc",
-                "term": query,
-                "retmax": str(max_results),
-                "retmode": "json",
-                "sort": "relevance",
-            },
-        )
-        payload: object = response.json()
+        request_data = {
+            "db": "pmc",
+            "term": query,
+            "retmax": str(max_results),
+            "retmode": "json",
+            "sort": "relevance",
+        }
+        last_error: PMCSearchResponseError | None = None
+        for response_attempt in range(1, self._max_attempts + 1):
+            response = self._post_with_retries(
+                self.ESEARCH_URL,
+                data=request_data,
+            )
+            try:
+                payload: object = response.json()
+            except ValueError as error:
+                last_error = PMCSearchResponseError(
+                    f"ESearch returned invalid JSON for query {query!r}"
+                )
+            else:
+                explicit_error = self._extract_esearch_error(payload)
+                if explicit_error is not None:
+                    raise PMCSearchResponseError(
+                        f"ESearch rejected query {query!r}: {explicit_error}"
+                    )
+                try:
+                    return self._extract_esearch_uids(payload, query)
+                except PMCSearchResponseError as error:
+                    last_error = error
+
+            if response_attempt < self._max_attempts:
+                if last_error is None:
+                    raise RuntimeError("Unreachable ESearch response state")
+                self._wait_before_retry(response_attempt, last_error)
+
+        if last_error is None:
+            raise RuntimeError("Unreachable ESearch retry state")
+        raise last_error
+
+    @staticmethod
+    def _extract_esearch_uids(payload: object, query: str) -> list[str]:
+        """Validate and normalize PMC UIDs from one ESearch JSON document."""
         if not isinstance(payload, dict):
-            raise ValueError("ESearch returned an invalid JSON document")
+            raise PMCSearchResponseError(
+                f"ESearch returned a non-object JSON document for query {query!r}"
+            )
 
         search_result = payload.get("esearchresult")
         if not isinstance(search_result, dict):
-            raise ValueError("ESearch response is missing 'esearchresult'")
+            raise PMCSearchResponseError(
+                f"ESearch response for query {query!r} is missing "
+                "an object-valued 'esearchresult'"
+            )
 
         id_list = search_result.get("idlist")
-        ids_are_valid = isinstance(id_list, list) and all(
-            isinstance(uid, str) and uid.isdigit()
-            for uid in id_list
-        )
-        if not ids_are_valid:
-            raise ValueError("ESearch response contains an invalid 'idlist'")
+        if not isinstance(id_list, list):
+            raise PMCSearchResponseError(
+                f"ESearch response for query {query!r} contains a non-list "
+                f"'idlist': {id_list!r}"
+            )
 
-        return [uid for uid in id_list if isinstance(uid, str)]
+        normalized_uids: list[str] = []
+        for uid in id_list:
+            if isinstance(uid, str) and uid.isdigit():
+                normalized_uids.append(uid)
+                continue
+            if isinstance(uid, int) and not isinstance(uid, bool) and uid >= 0:
+                normalized_uids.append(str(uid))
+                continue
+            raise PMCSearchResponseError(
+                f"ESearch response for query {query!r} contains an invalid "
+                f"UID in 'idlist': {uid!r}"
+            )
+        return normalized_uids
+
+    @staticmethod
+    def _extract_esearch_error(payload: object) -> str | None:
+        """Return an explicit NCBI error message from known JSON locations."""
+        if not isinstance(payload, dict):
+            return None
+
+        messages: list[str] = []
+        top_level_error = payload.get("error")
+        if isinstance(top_level_error, str) and top_level_error.strip():
+            messages.append(top_level_error.strip())
+
+        search_result = payload.get("esearchresult")
+        if isinstance(search_result, dict):
+            for key in ("ERROR", "error"):
+                result_error = search_result.get(key)
+                if isinstance(result_error, str) and result_error.strip():
+                    messages.append(result_error.strip())
+
+        if not messages:
+            return None
+        return "; ".join(dict.fromkeys(messages))
 
     def _fetch_titles(self, pmc_uids: list[str]) -> dict[str, str]:
         """Retrieve ESummary titles for PMC UIDs in API-friendly batches."""
@@ -201,7 +274,7 @@ class PMCSearch(HTTPContextManager):
     def _wait_before_retry(
         self,
         failed_attempt: int,
-        error: httpx.HTTPError,
+        error: Exception,
     ) -> None:
         """Log a transient failure and apply exponential retry backoff."""
         delay_s = self._retry_backoff_s * (2 ** (failed_attempt - 1))

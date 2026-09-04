@@ -1,8 +1,11 @@
 """Download PMC articles as local JATS XML files."""
 
+from collections.abc import Iterable, Iterator
+import os
 from pathlib import Path
 import random
 import re
+import tempfile
 import time
 from types import TracebackType
 
@@ -208,6 +211,27 @@ class PMCJATSDownloader:
         logger.debug(f"Built URL: {url}")
         return url
 
+    @staticmethod
+    def _write_atomic(path: Path, content: bytes) -> None:
+        """Publish bytes atomically through a process-unique neighboring file."""
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+                temporary_file.write(content)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            temporary_path.replace(path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
     # ---------- Core ----------
 
     def fetch_oai_xml(self, pmcid: str) -> bytes:
@@ -304,9 +328,7 @@ class PMCJATSDownloader:
             logger.info(f"Extracting JATS XML for {pmcid}...")
             jats_xml = self.extract_jats(oai_xml)
 
-            tmp = path.with_suffix(".tmp")
-            tmp.write_bytes(jats_xml)
-            tmp.replace(path)
+            self._write_atomic(path, jats_xml)
 
             logger.info(f"Successfully downloaded and saved {pmcid}")
             return DownloadResult(pmcid, path, "ok")
@@ -324,28 +346,41 @@ class PMCJATSDownloader:
             logger.error(f"Unexpected error for {pmcid}: {repr(e)}")
             return DownloadResult(pmcid, None, "error", repr(e))
 
+    def iter_downloads(
+        self,
+        pmcids: Iterable[str],
+        limit: int | None = None,
+    ) -> Iterator[DownloadResult]:
+        """
+        Yield download results as soon as each serial request finishes.
+
+        Args:
+            pmcids: PMC IDs to download in iteration order.
+            limit (int, optional): The maximum number of PMC IDs to download.
+
+        Yields:
+            One download result per selected PMC ID.
+
+        Raises:
+            TypeError: If ``pmcids`` is a string instead of an ID iterable.
+            ValueError: If ``limit`` is not positive.
+        """
+        if isinstance(pmcids, (str, bytes)):
+            raise TypeError("pmcids must be an iterable of PMC ID strings")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
+
+        for index, pmcid in enumerate(pmcids):
+            if limit is not None and index >= limit:
+                break
+            result = self.download_one(pmcid)
+            result.log()
+            yield result
+
     def download_many(
         self,
         pmcids: list[str],
         limit: int | None = None,
     ) -> list[DownloadResult]:
-        """
-        Downloads and extracts JATS XML for multiple PMC IDs.
-
-        Args:
-            pmcids (list[str]): A list of PMC IDs.
-            limit (int, optional): The maximum number of PMC IDs to download.
-
-        Returns:
-            list[DownloadResult]: A list of results for each download operation.
-        """
-        if limit is not None and limit <= 0:
-            raise ValueError("limit must be positive")
-
-        selected_pmcids = pmcids if limit is None else pmcids[:limit]
-        results: list[DownloadResult] = []
-        for pmcid in selected_pmcids:
-            result = self.download_one(pmcid)
-            result.log()
-            results.append(result)
-        return results
+        """Download multiple PMC IDs and return their completed results."""
+        return list(self.iter_downloads(pmcids, limit=limit))

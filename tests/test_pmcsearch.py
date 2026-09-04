@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import httpx
 
-from pmcortex.pmcsearch import PMCSearch
+from pmcortex.pmcsearch import PMCSearch, PMCSearchResponseError
 
 
 def api_response(payload: object) -> Mock:
@@ -203,6 +203,66 @@ class TestPMCSearch(unittest.TestCase):
         self.assertTrue(result.empty)
         self.assertEqual(search.client.post.call_count, 2)
         self.assertEqual(sleep_calls, [1.0])
+        search.close()
+
+    def test_search_retries_malformed_success_response_and_accepts_integer_uid(self) -> None:
+        """A transient incomplete 200 response must not abort seed discovery."""
+        now = 0.0
+        sleep_calls: list[float] = []
+
+        def fake_time() -> float:
+            return now
+
+        def fake_sleep(seconds: float) -> None:
+            nonlocal now
+            sleep_calls.append(seconds)
+            now += seconds
+
+        search = PMCSearch(
+            max_attempts=2,
+            retry_backoff_s=1.0,
+            time_fn=fake_time,
+            sleep_fn=fake_sleep,
+        )
+        search.client = Mock()
+        search.client.post.side_effect = [
+            api_response({"esearchresult": {"idlist": None}}),
+            api_response({"esearchresult": {"idlist": [123]}}),
+            api_response(
+                {
+                    "result": {
+                        "uids": ["123"],
+                        "123": {"title": "Recovered result"},
+                    }
+                }
+            ),
+        ]
+
+        result = search.search("recoverable query")
+
+        self.assertEqual(
+            result.to_dict("records"),
+            [{"pmcid": "PMC123", "title": "Recovered result"}],
+        )
+        self.assertEqual(sleep_calls[0], 1.0)
+        self.assertGreaterEqual(len(sleep_calls), 1)
+        search.close()
+
+    def test_search_reports_ncbi_error_and_failing_query(self) -> None:
+        """An explicit API error must not be hidden as an idlist type error."""
+        search = PMCSearch(max_attempts=3)
+        search.client = Mock()
+        search.client.post.return_value = api_response(
+            {"esearchresult": {"ERROR": "Invalid search field"}}
+        )
+
+        with self.assertRaisesRegex(
+            PMCSearchResponseError,
+            "problematic query.*Invalid search field",
+        ):
+            search.search("problematic query")
+
+        search.client.post.assert_called_once()
         search.close()
 
     def test_search_does_not_retry_permanent_client_error(self) -> None:

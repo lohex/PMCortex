@@ -76,7 +76,10 @@ class Context:
     section_index: int
     paragraph_index: int
     sentence_index: int
+    query_raw: str | None
     query: str
+    citation_forms: list[str]
+    citation_cleanup_action: str
     hits: list[str]
     query_length: int
     n_hits: int

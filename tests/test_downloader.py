@@ -1,9 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from pmcortex.downloader import PMCJATSDownloader
+from pmcortex.models import DownloadResult
 
 
 class TestPMCJATSDownloader(unittest.TestCase):
@@ -69,6 +70,43 @@ class TestPMCJATSDownloader(unittest.TestCase):
 
                 self.assertEqual(result.status, "not_found")
                 self.assertIsNone(result.path)
+            finally:
+                downloader.close()
+
+    def test_iter_downloads_yields_each_result_immediately(self) -> None:
+        """The streaming API preserves order and stops at the requested limit."""
+        with tempfile.TemporaryDirectory() as tmp:
+            downloader = PMCJATSDownloader(out_dir=tmp)
+            first = DownloadResult("PMC1", Path(tmp) / "PMC1.nxml", "ok")
+            second = DownloadResult("PMC2", None, "not_found", "missing")
+            try:
+                with patch.object(
+                    downloader,
+                    "download_one",
+                    side_effect=[first, second],
+                ) as download_one:
+                    results = list(
+                        downloader.iter_downloads(
+                            ["PMC1", "PMC2", "PMC3"],
+                            limit=2,
+                        )
+                    )
+
+                self.assertEqual(results, [first, second])
+                self.assertEqual(
+                    download_one.call_args_list,
+                    [call("PMC1"), call("PMC2")],
+                )
+            finally:
+                downloader.close()
+
+    def test_iter_downloads_rejects_string_input(self) -> None:
+        """A single string must not be interpreted as an iterable of IDs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            downloader = PMCJATSDownloader(out_dir=tmp)
+            try:
+                with self.assertRaises(TypeError):
+                    list(downloader.iter_downloads("PMC3438321"))
             finally:
                 downloader.close()
 

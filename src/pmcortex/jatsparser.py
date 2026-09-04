@@ -9,6 +9,13 @@ from lxml import etree
 import pandas as pd
 from loguru import logger
 
+from pmcortex.citation_normalizer import (
+    CitationDiagnostic,
+    CitationForm,
+    CitationNormalizer,
+    CitationOccurrence,
+    NormalizedCitationText,
+)
 from pmcortex.models import Context, JATSArticle, PositionedSentence, Reference
 
 ABBREVIATIONS = {
@@ -408,118 +415,84 @@ class JATSParser:
 
         return sections
     
-    def _replace_refs(self, paragraph: etree._Element) -> list[str]:
+    def _replace_refs(
+        self,
+        paragraph: etree._Element,
+        references: Iterable[Reference] = (),
+    ) -> list[str]:
         """
-        Flatten one paragraph-like element into ordered text paragraphs.
+        Return marker-bearing text blocks for one paragraph-like element.
 
-        Bibliographic references are converted to placeholders like
-        `[xref:R12]`. Figures and tables are emitted as separate paragraphs
-        containing their label and caption.
+        This compatibility wrapper delegates citation handling to
+        :class:`CitationNormalizer`. Figures and tables remain separate blocks.
         """
+        reference_list = list(references)
+        normalizer = self._build_citation_normalizer(reference_list)
+        normalized_blocks = self._normalize_refs(paragraph, normalizer)
+        return [block.text_with_markers for block in normalized_blocks]
+
+    def _normalize_refs(
+        self,
+        paragraph: etree._Element,
+        normalizer: CitationNormalizer,
+    ) -> list[NormalizedCitationText]:
+        """Normalize one paragraph while preserving caption block ordering."""
         element_name = self._local_name(paragraph)
         if element_name in SKIPPED_CONTENT_TAGS:
             logger.debug(f"Skipping JATS node {element_name}")
             return []
 
         if element_name in EXTRACTED_CAPTION_TAGS:
-            caption_paragraph = self._extract_caption_paragraph(paragraph)
-            return [caption_paragraph] if caption_paragraph else []
+            caption = self._normalize_caption(paragraph, normalizer)
+            return [caption] if caption.text_with_markers else []
 
-        paragraphs: list[str] = []
-        current_parts: list[str] = []
+        normalized_blocks: list[NormalizedCitationText] = []
+        current_fragments: list[str | etree._Element] = []
 
         def flush_current() -> None:
-            """Append and clear the currently accumulated paragraph text."""
-            text = self._normalize_text("".join(current_parts))
-            current_parts.clear()
-            if text:
-                paragraphs.append(text)
+            """Normalize and clear the currently accumulated mixed content."""
+            if not current_fragments:
+                return
+            normalized = normalizer.normalize_fragments(current_fragments)
+            current_fragments.clear()
+            if normalized.text_with_markers:
+                normalized_blocks.append(normalized)
 
         if paragraph.text:
-            current_parts.append(paragraph.text)
+            current_fragments.append(paragraph.text)
 
         for node in paragraph:
             node_name = self._local_name(node)
-            tail_text = node.tail
-
-            if self._is_bibr_xref(node):
-                ref_id = node.get("rid")
-                if ref_id:
-                    inner_html = node.text or ""
-                    if re.fullmatch(r'(?:\[[0-9]{1,3}[A-Za-z]?\]|[0-9]{1,3}[A-Za-z]?)', inner_html.strip()):
-                        inner_html = ''
-                    has_unclosed_parenthesis = "(" in inner_html and ")" not in inner_html
-                    closing_parenthesis_is_in_tail = (
-                        tail_text is not None and ")" in tail_text
-                    )
-                    if has_unclosed_parenthesis and closing_parenthesis_is_in_tail:
-                        before, after = tail_text.split(")", maxsplit=1)
-                        inner_html += before + ")"
-                        tail_text = after
-                    current_parts.append(f" {inner_html} [xref:{ref_id}] ")
-            elif node_name in EXTRACTED_CAPTION_TAGS:
+            if node_name in EXTRACTED_CAPTION_TAGS:
                 flush_current()
-                caption_paragraph = self._extract_caption_paragraph(node)
-                if caption_paragraph:
-                    paragraphs.append(caption_paragraph)
+                caption = self._normalize_caption(node, normalizer)
+                if caption.text_with_markers:
+                    normalized_blocks.append(caption)
             elif node_name in SKIPPED_CONTENT_TAGS:
                 logger.debug(f"Skipping JATS node {node_name}")
             else:
-                current_parts.append(self._serialize_text_with_refs(node))
+                current_fragments.append(node)
 
-            if tail_text:
-                current_parts.append(tail_text)
+            if node.tail:
+                current_fragments.append(node.tail)
 
         flush_current()
-        return paragraphs
-
-    @staticmethod
-    def _replace_ref_ranges(in_string: str) -> str:
-        """
-        Expand xref ranges into explicit xref markers.
-
-        Example: `[xref:R1] – [xref:R3]` becomes
-        `[xref:R1], [xref:R2], [xref:R3]`.
-        """
-        pattern = re.compile(r'\[xref:(\w+)(\d+)\]\s*(?:[–-]|to)\s*\[xref:(\w+)(\d+)\]')
-        while pattern.findall(in_string):
-            ref = pattern.search(in_string)
-            start_pos, end_pos = ref.span()
-            match_str = in_string[start_pos: end_pos]
-            base, min_ref, _, max_ref = ref.groups()
-            min_ref, max_ref = int(min_ref), int(max_ref)
-            ref_range = [f'[xref:{base}{i}]' for i in range(min_ref, max_ref+1)]
-            in_string = in_string.replace(match_str, ', '.join(ref_range))
-
-        return in_string
+        return normalized_blocks
 
     @staticmethod
     def _clean_string(in_string: str) -> str:
         """
-        Split text into sentence-like chunks and normalize whitespace/punctuation.
+        Normalize layout whitespace without removing semantic citation text.
 
-        Returns a list of cleaned strings ending with a period.
+        Citation markers are removed separately by :class:`CitationNormalizer`,
+        which preserves grammatical punctuation and author-year expressions.
         """
-        out_string = in_string.replace('\n', ' ').replace('▪', '')
-        out_string = re.sub(r' +', ' ', out_string)
-        out_string = re.sub(r' et al\.(,?\s*\[xref:[^\]]+\])', '\\1', out_string)
-        out_string = re.sub(r'\s*\(\s*[^\[\(\]\)]+\s*(\[xref:[^\]]+\])', '(\\1', out_string)
-        # Remove whitespace and unify seperators between multiple refs.
-        out_string = re.sub(r'\]\s*[;,]?\s*\[xref', '], [xref', out_string) 
-        # Remove opening brackes from ref-series e.g. see [[1, 2, 3]] -> 1, 2, 3
-        out_string = re.sub(r'[\[\(]\s*((\[xref:[^\]]+\](, )?)+)\s*[\]\)]', ' \\1 ', out_string)
-        # move refs before fullstop of the same sentence.
-        out_string = re.sub(r'\.\s*((\[xref:[^\]]+\](, )?)+)\s*(?=[A-Z]|$)', ' \\1. ', out_string)
-        out_string = out_string.replace(' .', '.')
-        out_string = re.sub(r' +', ' ', out_string)
-        
-        return out_string
+        normalized = in_string.replace("\n", " ").replace("▪", " ")
+        return JATSParser._normalize_text(normalized)
 
     @staticmethod
     def _split_sentences(text: str) -> list[str]:
-        """
-        Split text by sentences at full stop avoiding splits at abreviations (e.g.) and within brackets.
-        """
+        """Split at sentence-final periods while retaining trailing citations."""
         sentences = []
         start = 0
         paren_depth = 0
@@ -535,7 +508,7 @@ class JATSParser:
 
             all_closed = ch == "." and paren_depth == 0
             # allow splits at full stops after a closing bracket, e.g. "This is a sentence (with a comment (and a nested but unresolved). This is another sentence."
-            just_closed = ch == "." and text[i-1] in "])"
+            just_closed = ch == "." and i > 0 and text[i-1] in "])"
             if just_closed and not all_closed:
                 logger.info(f"Splitting at a full stop preceded by a closing bracket at position {i} in text: '{text[max(0, i-30):i+30]}'")
             if all_closed or just_closed:
@@ -545,15 +518,67 @@ class JATSParser:
                 is_abbrev = any(prefix.endswith(abbr) for abbr in ABBREVIATIONS)
                 is_initial = text[i-1:i].isupper() and text[i-2:i-1].isspace() if i >= 2 else False
 
-                j = i + 1
+                sentence_end = i + 1
+                j = sentence_end
                 while j < len(text) and text[j].isspace():
                     j += 1
-                has_trailing_space = j > i + 1
+                marker_starts_next_sentence = False
+                marker_match = re.match(
+                    (
+                        r"\[xref:[^\]]+\]"
+                        r"(?:\s*(?:[,;/&–—−-]|\band\b|\bto\b)\s*"
+                        r"\[xref:[^\]]+\])*"
+                    ),
+                    text[j:],
+                    flags=re.IGNORECASE,
+                )
+                if marker_match is not None:
+                    marker_end = j + marker_match.end()
+                    period_follows_marker = re.search(
+                        r"\[xref:[^\]]+\]\s*$",
+                        text[:i],
+                    ) is not None
+                    if period_follows_marker:
+                        marker_starts_next_sentence = True
+                    else:
+                        sentence_end = marker_end
+                        j = sentence_end
+                        while j < len(text) and text[j].isspace():
+                            j += 1
 
-                next_is_upper = j < len(text) and text[j].isupper()
+                has_trailing_space = j > sentence_end
 
-                if has_trailing_space and (not is_abbrev) and (not is_initial) and next_is_upper:
-                    sentences.append(text[start:i + 1].strip())
+                is_parenthetical_et_al_continuation = (
+                    prefix.endswith("et al.")
+                    and j < len(text)
+                    and text[j] == "("
+                )
+
+                sentence_start = j
+                while sentence_start < len(text) and text[sentence_start] in "\"'“‘([":
+                    sentence_start += 1
+
+                next_starts_sentence = (
+                    marker_starts_next_sentence
+                    or (
+                        sentence_start < len(text)
+                        and (
+                            text[sentence_start].isupper()
+                            or text[sentence_start].isdigit()
+                        )
+                    )
+                )
+
+                if (
+                    has_trailing_space
+                    and not (
+                        is_abbrev
+                        or is_parenthetical_et_al_continuation
+                    )
+                    and not is_initial
+                    and next_starts_sentence
+                ):
+                    sentences.append(text[start:sentence_end].strip())
                     start = j
                     i = j
                     continue
@@ -566,39 +591,80 @@ class JATSParser:
 
         return sentences
 
-    def _remove_and_keep_refs(
+    def _context_from_sentence(
         self,
-        sentences: list[PositionedSentence],
+        sentence: PositionedSentence,
+        normalizer: CitationNormalizer,
         ref_id_to_pmid: dict[str, str],
-    ) -> list[Context]:
+        unsafe_citation_rids: frozenset[str],
+        citation_occurrences: tuple[CitationOccurrence, ...],
+        raw_sentence_text: str | None,
+    ) -> Context | None:
         """
-        Extract contexts that contain xref markers.
+        Build one retrieval context from a marker-bearing positioned sentence.
 
-        Each context retains the structural position of its source sentence.
+        PMID hits are stable-deduplicated because the benchmark represents cited
+        documents, not repeated citation occurrences. On success, the query is
+        stored as ``self.last_context`` for the next emitted context.
         """
-        contexts: list[Context] = []
-        for sentence in sentences:
-            query = sentence.text
-            refs = re.findall(r'\[xref:.*?\]', query)
-            ref_list = [ref_id_to_pmid[ref] for ref in refs if ref in ref_id_to_pmid]
-            if ref_list:
-                clean_query = re.sub(r' ?(\[xref:.*?\](, )?)+', '', query)
-                query_words = len(clean_query.split())
-                context = Context(
-                    source_pmcid=self.pmcid,
-                    section_index=sentence.section_index,
-                    paragraph_index=sentence.paragraph_index,
-                    sentence_index=sentence.sentence_index,
-                    query=clean_query,
-                    query_length=query_words,
-                    hits=ref_list,
-                    n_hits=len(ref_list),
-                    context=self.last_context,
-                )
-                self.last_context = clean_query
-                contexts.append(context)
+        cited_rids = normalizer.extract_rids(sentence.text)
+        has_unsafe_citation = bool(
+            set(cited_rids).intersection(unsafe_citation_rids)
+        )
+        if has_unsafe_citation:
+            self.unsafe_citation_rejections += 1
+            return None
 
-        return contexts
+        pmid_hits = list(dict.fromkeys(
+            ref_id_to_pmid[rid]
+            for rid in cited_rids
+            if rid in ref_id_to_pmid
+        ))
+        if not pmid_hits:
+            return None
+
+        clean_query = normalizer.remove_markers(sentence.text)
+        if not clean_query:
+            return None
+
+        cited_rid_set = set(cited_rids)
+        sentence_occurrences = tuple(
+            occurrence
+            for occurrence in citation_occurrences
+            if cited_rid_set.intersection(occurrence.rids)
+        )
+        citation_forms = list(dict.fromkeys(
+            occurrence.form.value for occurrence in sentence_occurrences
+        ))
+        has_parenthetical_author_year = any(
+            occurrence.form is CitationForm.PARENTHETICAL_AUTHOR_YEAR
+            for occurrence in sentence_occurrences
+        )
+        cleanup_action = (
+            "removed_parenthetical_citation"
+            if has_parenthetical_author_year
+            else "removed_label_citation"
+        )
+        raw_query = None
+        if raw_sentence_text is not None:
+            raw_query = normalizer.remove_markers(raw_sentence_text)
+
+        context = Context(
+            source_pmcid=self.pmcid,
+            section_index=sentence.section_index,
+            paragraph_index=sentence.paragraph_index,
+            sentence_index=sentence.sentence_index,
+            query_raw=raw_query,
+            query=clean_query,
+            citation_forms=citation_forms,
+            citation_cleanup_action=cleanup_action,
+            query_length=len(clean_query.split()),
+            hits=pmid_hits,
+            n_hits=len(pmid_hits),
+            context=self.last_context,
+        )
+        self.last_context = clean_query
+        return context
 
 
     def extract_contexts(
@@ -610,24 +676,45 @@ class JATSParser:
         """
         Build reference contexts from parsed sections.
 
-        Populates `self.contexts` with `(query, refs)` tuples. If
-        `save_sentences` is `True`, also populates positioned full-text sentences.
+        Populates ``self.contexts`` with positioned :class:`Context` values. If
+        ``save_sentences`` is true, marker-bearing full-text sentences are kept
+        in ``self.sentences`` at exactly the same structural positions.
+
+        Raises:
+            RuntimeError: If no source PMCID has been assigned to the parser.
         """
-        
+        if not hasattr(self, "pmcid") or not isinstance(self.pmcid, str):
+            raise RuntimeError("Set parser.pmcid before extracting contexts")
+
         self.contexts: list[Context] = []
         self.sentences: list[PositionedSentence] = []
+        self.citation_diagnostics: list[CitationDiagnostic] = []
+        self.unsafe_citation_rejections = 0
 
-        pmid_replace = {f"[xref:{r.rid}]": r.pmid for r in references if r.pmid}
+        normalizer = self._build_citation_normalizer(references)
+        ref_id_to_pmid = {
+            reference.rid: reference.pmid
+            for reference in references
+            if reference.rid is not None and reference.pmid is not None
+        }
         for s, section in enumerate(sections):
             paragraphs = section["paragraphs"]
             if not isinstance(paragraphs, list):
                 continue
             for p, ref_paragraph in enumerate(paragraphs):
                 next_sentence_index = 0
-                for ref_text in self._replace_refs(ref_paragraph):
-                    ref_text = self._replace_ref_ranges(ref_text)
-                    ref_text = self._clean_string(ref_text)
-                    sentence_texts = self._split_sentences(ref_text)
+                normalized_blocks = self._normalize_refs(ref_paragraph, normalizer)
+                for normalized in normalized_blocks:
+                    self.citation_diagnostics.extend(normalized.diagnostics)
+                    sentence_texts = self._split_sentences(
+                        normalized.query_text_with_markers
+                    )
+                    raw_sentence_texts = self._split_sentences(
+                        normalized.text_with_markers
+                    )
+                    raw_sentences_align = (
+                        len(raw_sentence_texts) == len(sentence_texts)
+                    )
                     sentences = [
                         PositionedSentence(
                             section_index=s,
@@ -640,9 +727,36 @@ class JATSParser:
                     next_sentence_index += len(sentences)
                     if save_sentences:
                         self.sentences.extend(sentences)
-                    ref_contexts = self._remove_and_keep_refs(sentences, pmid_replace)
-                    self.contexts.extend(ref_contexts)
+                    for block_sentence_index, sentence in enumerate(sentences):
+                        raw_sentence_text = None
+                        if raw_sentences_align:
+                            raw_sentence_text = raw_sentence_texts[
+                                block_sentence_index
+                            ]
+                        context = self._context_from_sentence(
+                            sentence,
+                            normalizer,
+                            ref_id_to_pmid,
+                            frozenset(normalized.unsafe_citation_rids),
+                            normalized.citation_occurrences,
+                            raw_sentence_text,
+                        )
+                        if context is not None:
+                            self.contexts.append(context)
             self.last_context = None
+
+        if self.citation_diagnostics:
+            logger.warning(
+                "Recovered from {} citation-normalization issues in {}",
+                len(self.citation_diagnostics),
+                self.pmcid,
+            )
+        if self.unsafe_citation_rejections:
+            logger.warning(
+                "Rejected {} queries with unsafe semantic citations in {}",
+                self.unsafe_citation_rejections,
+                self.pmcid,
+            )
 
     def contexts_to_dataframe(self) -> pd.DataFrame:
         """
@@ -659,7 +773,7 @@ class JATSParser:
                 f"{sentence.section_index}/"
                 f"{sentence.paragraph_index}/"
                 f"{sentence.sentence_index}\t"
-                f"{re.sub(r'\\(\\s*\\)', '', sentence.text)}"
+                f"{sentence.text}"
             )
             for sentence in self.sentences
         ]
@@ -699,39 +813,71 @@ class JATSParser:
         """Return True for bibliographic cross-reference nodes."""
         return self._local_name(element) == "xref" and element.get("ref-type") == "bibr"
 
-    def _serialize_text_with_refs(self, element: etree._Element) -> str:
+    def _build_citation_normalizer(
+        self,
+        references: Iterable[Reference],
+    ) -> CitationNormalizer:
         """
-        Recursively flatten inline content while preserving bibliographic refs.
+        Build an article-scoped normalizer from JATS ref order and visible labels.
 
-        Nodes listed in `SKIPPED_CONTENT_TAGS` and extracted caption blocks are
-        skipped, but their tails are preserved by the caller.
+        Raw ``<ref>`` nodes are used first because ``extract_references`` may skip
+        uncommon citation encodings that can still occur inside an xref range.
         """
-        if self._is_bibr_xref(element):
-            ref_id = element.get("rid")
-            return f" [xref:{ref_id}] " if ref_id else ""
+        reference_order: list[str] = []
+        reference_labels: dict[str, str | None] = {}
 
-        element_name = self._local_name(element)
-        if element_name in SKIPPED_CONTENT_TAGS or element_name in EXTRACTED_CAPTION_TAGS:
-            return ""
+        if hasattr(self, "root"):
+            ref_elements = self.root.xpath(
+                ".//*[local-name()='back']//*[local-name()='ref-list']"
+                "//*[local-name()='ref'][@id]"
+            )
+            for ref_element in ref_elements:
+                rid = ref_element.get("id")
+                if not rid:
+                    continue
+                reference_order.append(rid)
+                label_elements = ref_element.xpath("./*[local-name()='label']")
+                label = None
+                if label_elements:
+                    label = self._normalize_text(
+                        "".join(label_elements[0].itertext())
+                    )
+                reference_labels[rid] = label
 
-        parts: list[str] = []
-        if element.text:
-            parts.append(element.text)
+        for reference in references:
+            if reference.rid is None:
+                continue
+            reference_order.append(reference.rid)
+            if reference.rid not in reference_labels:
+                reference_labels[reference.rid] = reference.label
 
-        for child in element:
-            parts.append(self._serialize_text_with_refs(child))
-            if child.tail:
-                parts.append(child.tail)
+        return CitationNormalizer(
+            reference_order,
+            reference_labels,
+            skipped_tags=SKIPPED_CONTENT_TAGS | EXTRACTED_CAPTION_TAGS,
+        )
 
-        return "".join(parts)
+    def _normalize_caption(
+        self,
+        element: etree._Element,
+        normalizer: CitationNormalizer,
+    ) -> NormalizedCitationText:
+        """Normalize a figure or table label and caption as one text block."""
+        fragments: list[str | etree._Element] = []
+        label_element = self._find_element("./j:label", element)
+        caption_element = self._find_element("./j:caption", element)
+        if label_element is not None:
+            fragments.append(label_element)
+        if label_element is not None and caption_element is not None:
+            fragments.append(" ")
+        if caption_element is not None:
+            fragments.append(caption_element)
+        return normalizer.normalize_fragments(fragments)
 
     def _extract_caption_paragraph(self, element: etree._Element) -> str:
         """Extract one figure/table caption paragraph from label and caption."""
-        label_element = self._find_element("./j:label", element)
-        caption_element = self._find_element("./j:caption", element)
-        label = self._normalize_text(self._serialize_text_with_refs(label_element)) if label_element is not None else ""
-        caption = self._normalize_text(self._serialize_text_with_refs(caption_element)) if caption_element is not None else ""
-        return self._normalize_text(" ".join(part for part in [label, caption] if part))
+        normalizer = self._build_citation_normalizer(())
+        return self._normalize_caption(element, normalizer).text_with_markers
 
     def _flatten_text(self, element: etree._Element) -> str | None:
         """

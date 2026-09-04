@@ -3,7 +3,15 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from pmcortex.query_filters import CrossContextCoreferenceFilter, QueryFilterPipeline
+from pmcortex.query_filters import (
+    CitationSpoilerError,
+    CitationSpoilerReason,
+    CrossContextCoreferenceFilter,
+    QueryFilterPipeline,
+    assess_residual_citation_spoiler,
+    assert_no_residual_citation_spoilers,
+    filter_citation_spoilers,
+)
 
 
 class _FakeCoreferenceExtensions:
@@ -97,7 +105,169 @@ class TestQueryFilterPipeline(unittest.TestCase):
             pipeline.filter_min_source_count(2)
 
         remaining_queries = pipeline.filtered_df["query"].tolist()
-        self.assertEqual(remaining_queries, ["Clean query."])
+        self.assertEqual(
+            remaining_queries,
+            ["Clean query.", "Smith reported the effect."],
+        )
+
+    def test_explicit_spoiler_uses_serialized_authors_of_positive_hit_only(self) -> None:
+        """Real list serialization must match only the query's positive authors."""
+        with TemporaryDirectory() as tmpdir:
+            pd.DataFrame(
+                [
+                    {
+                        "query": "Bhatti reported the effect.",
+                        "hits": "['22910289']",
+                        "n_hits": 1,
+                        "source_pmcid": "PMC1",
+                    },
+                    {
+                        "query": "Bhatti reported an unrelated comparison.",
+                        "hits": "['20000000']",
+                        "n_hits": 1,
+                        "source_pmcid": "PMC1",
+                    },
+                ]
+            ).to_csv(f"{tmpdir}/extracted_contexts.csv", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "source_pmcid": "PMC1",
+                        "pmid": "22910289",
+                        "authors": "['Bhatti H. N.', 'Khera R. A.']",
+                    },
+                    {
+                        "source_pmcid": "PMC1",
+                        "pmid": "20000000",
+                        "authors": "['Cooper C.']",
+                    },
+                ]
+            ).to_csv(f"{tmpdir}/extracted_sources.csv", index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "abstract": "a",
+                        "authors": "['Main M.']",
+                        "pmcid": "PMC1",
+                        "pmid": "1",
+                        "title": "t1",
+                    }
+                ]
+            ).to_csv(f"{tmpdir}/extracted_metadata.csv", index=False)
+
+            pipeline = QueryFilterPipeline(tmpdir)
+            pipeline.filter_no_explicit_spoilers()
+
+        self.assertEqual(
+            pipeline.filtered_df["query"].tolist(),
+            ["Bhatti reported an unrelated comparison."],
+        )
+
+    def test_residual_spoiler_detector_has_biomedical_negative_controls(self) -> None:
+        """Citation syntax must be detected without flagging measurements."""
+        spoiler = assess_residual_citation_spoiler(
+            "The enzyme remained active (Trincone, 2011)."
+        )
+        clean_queries = (
+            "Critical deficiencies were a small part of the total (2.5%).",
+            "Vitamin D exceeded 30 ng/mL (75 nmol/L).",
+            "Acetylcholinesterase (AChE) activity declined.",
+            "The Hamilton Model 1710 RN SYR was used.",
+        )
+
+        self.assertTrue(spoiler.is_spoiler)
+        self.assertIn(
+            CitationSpoilerReason.PARENTHETICAL_AUTHOR_YEAR,
+            spoiler.reasons,
+        )
+        self.assertTrue(
+            all(
+                not assess_residual_citation_spoiler(query).is_spoiler
+                for query in clean_queries
+            )
+        )
+
+    def test_final_residual_assertion_fails_closed(self) -> None:
+        """Final exports must fail when even one residual spoiler remains."""
+        queries = pd.DataFrame(
+            {
+                "query": [
+                    "Clean biological statement.",
+                    "Prior work remains relevant (Smith & Jones, 2020).",
+                ]
+            }
+        )
+
+        with self.assertRaises(CitationSpoilerError):
+            assert_no_residual_citation_spoilers(queries)
+
+    def test_existing_benchmark_filter_returns_auditable_complement(self) -> None:
+        """Standalone migration keeps clean rows and annotates rejected rows."""
+        queries = pd.DataFrame(
+            [
+                {
+                    "source_pmcid": "PMC1",
+                    "query": "Bhatti reported the effect.",
+                    "hits_parsed": "['22910289']",
+                },
+                {
+                    "source_pmcid": "PMC1",
+                    "query": "The enzyme remained active.",
+                    "hits_parsed": "['20000000']",
+                },
+            ]
+        )
+        sources = pd.DataFrame(
+            [
+                {
+                    "source_pmcid": "PMC1",
+                    "pmid": "22910289",
+                    "authors": "['Bhatti H. N.', 'Khera R. A.']",
+                },
+                {
+                    "source_pmcid": "PMC1",
+                    "pmid": "20000000",
+                    "authors": "['Cooper C.']",
+                },
+            ]
+        )
+
+        result = filter_citation_spoilers(queries, sources)
+
+        self.assertEqual(
+            result.filtered["query"].tolist(),
+            ["The enzyme remained active."],
+        )
+        self.assertEqual(
+            result.rejected["citation_spoiler_reasons"].iloc[0],
+            [CitationSpoilerReason.POSITIVE_AUTHOR.value],
+        )
+        self.assertEqual(
+            result.rejected["rejection_stage"].iloc[0],
+            "filter_citation_spoilers",
+        )
+
+        incomplete_query = pd.DataFrame(
+            [
+                {
+                    "source_pmcid": "PMC1",
+                    "query": "A syntactically clean legacy statement.",
+                    "hits_parsed": "['99999999']",
+                }
+            ]
+        )
+        conservative_result = filter_citation_spoilers(
+            incomplete_query,
+            sources,
+            require_complete_author_metadata=True,
+        )
+        self.assertTrue(conservative_result.filtered.empty)
+        self.assertEqual(
+            conservative_result.rejected["citation_spoiler_reasons"].iloc[0],
+            [
+                CitationSpoilerReason.INCOMPLETE_POSITIVE_AUTHOR_METADATA.value
+            ],
+        )
 
     def test_filter_min_hit_queries_accepts_n_other_than_one(self) -> None:
         with TemporaryDirectory() as tmpdir:
