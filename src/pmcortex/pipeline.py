@@ -22,11 +22,21 @@ from typing import Literal, cast
 from loguru import logger
 import pandas as pd
 from tqdm.auto import tqdm
-import yaml
 
 from pmcortex.downloader import PMCJATSDownloader
 from pmcortex.jatsparser import JATSParser
-from pmcortex.models import Context, PositionedSentence, Reference
+from pmcortex.models import ParsedJATSResult
+from pmcortex.serialization import (
+    CONTEXT_COLUMNS,
+    METADATA_COLUMNS,
+    SOURCE_COLUMNS,
+    contexts_to_dataframe,
+    metadata_to_dataframe,
+    normalize_author_lists,
+    references_to_dataframe,
+    render_author_yaml,
+    render_positioned_sentences,
+)
 
 
 ProcessingStatus = Literal[
@@ -45,34 +55,6 @@ PROCESSING_STATUSES: tuple[ProcessingStatus, ...] = (
     "parse_error",
     "persist_error",
 )
-
-METADATA_COLUMNS = ["pmcid", "pmid", "title", "abstract", "authors"]
-SOURCE_COLUMNS = [
-    "rid",
-    "label",
-    "doi",
-    "pmid",
-    "pmcid",
-    "year",
-    "title",
-    "journal",
-    "authors",
-    "source_pmcid",
-]
-CONTEXT_COLUMNS = [
-    "source_pmcid",
-    "section_index",
-    "paragraph_index",
-    "sentence_index",
-    "query_raw",
-    "query",
-    "citation_forms",
-    "citation_cleanup_action",
-    "hits",
-    "query_length",
-    "n_hits",
-    "context",
-]
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,57 +132,15 @@ class MaterializedDataset:
     contexts: Path
 
 
-@dataclass(frozen=True, slots=True)
-class _ParsedJATS:
-    """Pickle-safe parser output transferred from a worker process."""
-
-    pmcid: str
-    pmid: str | None
-    title: str | None
-    abstract: str | None
-    authors: tuple[str, ...]
-    references: tuple[Reference, ...]
-    contexts: tuple[Context, ...]
-    sentences: tuple[PositionedSentence, ...]
-    authors_yaml: str
-    diagnostic_count: int
-    unsafe_citation_rejection_count: int
-
-
-def _parse_jats(path: Path, expected_pmcid: str) -> _ParsedJATS:
+def _parse_jats(path: Path, expected_pmcid: str) -> ParsedJATSResult:
     """Parse one JATS document in an isolated worker process."""
     # Only the main process writes operational logs; concurrent file sinks can
     # otherwise interleave output when several parser processes finish at once.
     logger.disable("pmcortex")
-    parser = JATSParser()
-    article = parser.parse_article(
+    return JATSParser().parse(
         path,
-        pmcid=expected_pmcid,
-        save_sentences=True,
-    )
-    if article.pmcid != expected_pmcid:
-        raise ValueError(
-            f"JATS PMCID {article.pmcid!r} does not match file {expected_pmcid!r}"
-        )
-
-    author_data = parser.normalized_authors_and_refs()
-    authors_yaml = yaml.safe_dump(
-        author_data,
-        sort_keys=False,
-        allow_unicode=False,
-    )
-    return _ParsedJATS(
-        pmcid=expected_pmcid,
-        pmid=article.pmid,
-        title=article.title,
-        abstract=article.abstract,
-        authors=tuple(article.authors),
-        references=tuple(article.references),
-        contexts=tuple(parser.contexts),
-        sentences=tuple(parser.sentences),
-        authors_yaml=authors_yaml,
-        diagnostic_count=len(parser.citation_diagnostics),
-        unsafe_citation_rejection_count=parser.unsafe_citation_rejections,
+        expected_pmcid=expected_pmcid,
+        include_sentences=True,
     )
 
 
@@ -397,7 +337,7 @@ class PMCIngestionPipeline:
         records: dict[str, ProcessingRecord] = {}
         local_pmcids = {path.stem for path in local_paths}
         local_paths_by_pmcid = {path.stem: path for path in local_paths}
-        pending: dict[Future[_ParsedJATS], tuple[str, Path]] = {}
+        pending: dict[Future[ParsedJATSResult], tuple[str, Path]] = {}
         target_pmcids = local_pmcids | set(requested_pmcids)
         already_processed = {
             pmcid
@@ -525,7 +465,7 @@ class PMCIngestionPipeline:
         pmcid: str,
         path: Path,
         executor: ProcessPoolExecutor,
-        pending: dict[Future[_ParsedJATS], tuple[str, Path]],
+        pending: dict[Future[ParsedJATSResult], tuple[str, Path]],
         records: dict[str, ProcessingRecord],
     ) -> None:
         """Reuse current artifacts or submit one parse to the worker pool."""
@@ -566,7 +506,7 @@ class PMCIngestionPipeline:
 
     def _collect_completed(
         self,
-        pending: dict[Future[_ParsedJATS], tuple[str, Path]],
+        pending: dict[Future[ParsedJATSResult], tuple[str, Path]],
         records: dict[str, ProcessingRecord],
         *,
         block_when_full: bool = False,
@@ -604,7 +544,7 @@ class PMCIngestionPipeline:
                     "persist_error",
                     repr(error),
                     path,
-                    diagnostic_count=parsed.diagnostic_count,
+                    diagnostic_count=len(parsed.diagnostics),
                     unsafe_citation_rejection_count=(
                         parsed.unsafe_citation_rejection_count
                     ),
@@ -620,64 +560,50 @@ class PMCIngestionPipeline:
                 "{} citation diagnostics, {} unsafe citation rejections "
                 "({} parser jobs pending)",
                 pmcid,
-                len(parsed.references),
+                len(parsed.article.references),
                 len(parsed.contexts),
                 len(parsed.sentences),
-                parsed.diagnostic_count,
+                len(parsed.diagnostics),
                 parsed.unsafe_citation_rejection_count,
                 len(pending),
             )
             self._delete_jats_if_requested(path)
 
-    def _persist_parsed(self, parsed: _ParsedJATS, path: Path) -> ProcessingRecord:
+    def _persist_parsed(
+        self,
+        parsed: ParsedJATSResult,
+        path: Path,
+    ) -> ProcessingRecord:
         """Publish every per-article artifact and finally its success record."""
-        artifact_dir = self.layout.parsed_dir / parsed.pmcid
-        metadata = pd.DataFrame(
-            [{
-                "pmcid": parsed.pmcid,
-                "pmid": parsed.pmid,
-                "title": parsed.title,
-                "abstract": parsed.abstract,
-                "authors": list(parsed.authors),
-            }],
-            columns=METADATA_COLUMNS,
+        article = parsed.article
+        if article.pmcid is None:
+            raise ValueError("parsed article must have a PMCID before persistence")
+
+        artifact_dir = self.layout.parsed_dir / article.pmcid
+        metadata = metadata_to_dataframe(article)
+        sources = references_to_dataframe(
+            article.pmcid,
+            article.references,
         )
-        sources = pd.DataFrame(
-            [
-                {**asdict(reference), "source_pmcid": parsed.pmcid}
-                for reference in parsed.references
-            ],
-            columns=SOURCE_COLUMNS,
-        )
-        contexts = pd.DataFrame(
-            [asdict(context) for context in parsed.contexts],
-            columns=CONTEXT_COLUMNS,
-        )
-        fulltext = "\n".join(
-            (
-                f"{sentence.section_index}/"
-                f"{sentence.paragraph_index}/"
-                f"{sentence.sentence_index}\t"
-                f"{sentence.text}"
-            )
-            for sentence in parsed.sentences
-        )
+        contexts = contexts_to_dataframe(parsed.contexts)
+        fulltext = render_positioned_sentences(parsed.sentences)
+        authors_yaml = render_author_yaml(normalize_author_lists(article))
 
         self._write_dataframe(artifact_dir / "metadata.csv", metadata)
         self._write_dataframe(artifact_dir / "sources.csv", sources)
         self._write_dataframe(artifact_dir / "contexts.csv", contexts)
         _atomic_write_text(
-            self.layout.fulltexts_dir / f"{parsed.pmcid}.txt",
+            self.layout.fulltexts_dir / f"{article.pmcid}.txt",
             fulltext,
         )
         _atomic_write_text(
-            self.layout.authors_dir / f"{parsed.pmcid}.yaml",
-            parsed.authors_yaml,
+            self.layout.authors_dir / f"{article.pmcid}.yaml",
+            authors_yaml,
         )
 
         source_stat = path.stat()
         record = ProcessingRecord(
-            pmcid=parsed.pmcid,
+            pmcid=article.pmcid,
             status="complete",
             reason="parsed and persisted",
             jats_path=str(path),
@@ -685,7 +611,7 @@ class PMCIngestionPipeline:
             parser_schema_version=self.parser_schema_version,
             source_size=source_stat.st_size,
             source_mtime_ns=source_stat.st_mtime_ns,
-            diagnostic_count=parsed.diagnostic_count,
+            diagnostic_count=len(parsed.diagnostics),
             unsafe_citation_rejection_count=(
                 parsed.unsafe_citation_rejection_count
             ),

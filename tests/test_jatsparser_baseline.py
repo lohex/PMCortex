@@ -1,6 +1,6 @@
 """Characterize the pre-refactoring JATS parser behavior and artifact schema."""
 
-from dataclasses import asdict
+from dataclasses import FrozenInstanceError, asdict
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,9 +15,13 @@ from pmcortex.citation_normalizer import (
     CitationOccurrence,
     NormalizedCitationText,
 )
-from pmcortex.jatsparser import JATSParser
-from pmcortex.models import JATSArticle, Reference
+from pmcortex.jatsparser import JATSParser, _ArticleParseSession, _ElementSection
+from pmcortex.models import ParsedJATSResult, Reference
 from pmcortex.pipeline import CONTEXT_COLUMNS, METADATA_COLUMNS, SOURCE_COLUMNS
+from pmcortex.serialization import (
+    author_lists_to_payload,
+    normalize_author_lists,
+)
 from tests._shared import existing_example_files
 
 
@@ -48,10 +52,10 @@ def _load_expected_snapshot(pmcid: str) -> JsonObject:
 
 
 def _snapshot_parser_output(
-    parser: JATSParser,
-    article: JATSArticle,
+    result: ParsedJATSResult,
 ) -> JsonObject:
     """Build the stable pre-refactoring snapshot for one parsed article."""
+    article = result.article
     payload = {
         "metadata": {
             "pmcid": article.pmcid,
@@ -63,24 +67,52 @@ def _snapshot_parser_output(
         "references": [asdict(reference) for reference in article.references],
         "sections": [
             {
-                "title": section["title"],
-                "full_title": section["full_title"],
-                "paragraph_count": len(section["paragraphs"]),
+                "title": section.title,
+                "full_title": section.full_title,
+                "paragraph_count": len(section.source_blocks),
             }
             for section in article.sections
         ],
-        "contexts": [asdict(context) for context in parser.contexts],
-        "sentences": [asdict(sentence) for sentence in parser.sentences],
-        "normalized_authors_and_refs": parser.normalized_authors_and_refs(),
+        "contexts": [
+            {
+                "source_pmcid": context.position.source_pmcid,
+                "section_index": context.position.section_index,
+                "paragraph_index": context.position.paragraph_index,
+                "sentence_index": context.position.sentence_index,
+                "query_raw": context.query_raw,
+                "query": context.query,
+                "citation_forms": context.citation_forms,
+                "citation_cleanup_action": context.citation_cleanup_action.value,
+                "hits": context.hits,
+                "query_length": context.query_length,
+                "n_hits": context.n_hits,
+                "context": context.context,
+            }
+            for context in result.contexts
+        ],
+        "sentences": [
+            {
+                "section_index": sentence.position.section_index,
+                "paragraph_index": sentence.position.paragraph_index,
+                "sentence_index": sentence.position.sentence_index,
+                "text": sentence.text,
+            }
+            for sentence in result.sentences
+        ],
+        "normalized_authors_and_refs": author_lists_to_payload(
+            normalize_author_lists(article)
+        ),
         "citation_diagnostics": [
             {
                 "code": diagnostic.code.value,
                 "rids": list(diagnostic.rids),
                 "source_line": diagnostic.source_line,
             }
-            for diagnostic in parser.citation_diagnostics
+            for diagnostic in result.diagnostics
         ],
-        "unsafe_citation_rejection_count": parser.unsafe_citation_rejections,
+        "unsafe_citation_rejection_count": (
+            result.unsafe_citation_rejection_count
+        ),
     }
     return _as_json_object(payload)
 
@@ -98,14 +130,13 @@ class TestJATSParserGoldenBaseline(unittest.TestCase):
 
         for pmcid, article_path in examples.items():
             with self.subTest(pmcid=pmcid):
-                parser = JATSParser()
-                article = parser.parse_article(
+                result = JATSParser().parse(
                     article_path,
-                    pmcid=pmcid,
-                    save_sentences=True,
+                    expected_pmcid=pmcid,
+                    include_sentences=True,
                 )
 
-                actual = _snapshot_parser_output(parser, article)
+                actual = _snapshot_parser_output(result)
                 expected = _load_expected_snapshot(pmcid)
 
                 self.assertEqual(actual, expected)
@@ -114,21 +145,74 @@ class TestJATSParserGoldenBaseline(unittest.TestCase):
         """A second parse must not retain outputs belonging to the first article."""
         examples = existing_example_files()
         parser = JATSParser()
-        parser.parse_article(
+        parser.parse(
             examples["PMC3438321"],
-            pmcid="PMC3438321",
-            save_sentences=True,
+            expected_pmcid="PMC3438321",
+            include_sentences=True,
         )
 
-        second_article = parser.parse_article(
+        second_result = parser.parse(
             examples["PMC2693326"],
-            pmcid="PMC2693326",
-            save_sentences=True,
+            expected_pmcid="PMC2693326",
+            include_sentences=True,
         )
 
-        actual = _snapshot_parser_output(parser, second_article)
+        actual = _snapshot_parser_output(second_result)
         expected = _load_expected_snapshot("PMC2693326")
         self.assertEqual(actual, expected)
+
+
+class TestJATSParserResultAPI(unittest.TestCase):
+    """Verify the new stateless facade and immutable result contract."""
+
+    def test_result_collections_and_models_are_immutable(self) -> None:
+        """Public collections are tuples and frozen models reject mutation."""
+        pmcid, path = next(iter(existing_example_files().items()))
+
+        result = JATSParser().parse(
+            path,
+            expected_pmcid=pmcid,
+            include_sentences=True,
+        )
+
+        self.assertIsInstance(result.article.authors, tuple)
+        self.assertIsInstance(result.article.references, tuple)
+        self.assertIsInstance(result.article.sections, tuple)
+        self.assertIsInstance(result.contexts, tuple)
+        self.assertIsInstance(result.sentences, tuple)
+        self.assertIsInstance(result.diagnostics, tuple)
+        with self.assertRaises(FrozenInstanceError):
+            setattr(result.article, "title", "changed")
+
+    def test_public_parse_validates_all_arguments(self) -> None:
+        """Every public argument rejects wrong types and invalid values."""
+        pmcid, path = next(iter(existing_example_files().items()))
+        parser = JATSParser()
+
+        with self.assertRaises(TypeError):
+            parser.parse(123)  # type: ignore[arg-type]
+        with self.assertRaises(FileNotFoundError):
+            parser.parse(path.parent / "missing.nxml")
+        with self.assertRaises(TypeError):
+            parser.parse(path, expected_pmcid=123)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            parser.parse(path, expected_pmcid=" ")
+        with self.assertRaises(TypeError):
+            parser.parse(path, include_sentences=1)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            parser.parse(path, expected_pmcid=f"{pmcid}_MISMATCH")
+
+    def test_public_parser_does_not_retain_result_state(self) -> None:
+        """The facade has no mutable instance dictionary or result attributes."""
+        parser = JATSParser()
+        pmcid, path = next(iter(existing_example_files().items()))
+
+        parser.parse(path, expected_pmcid=pmcid)
+
+        self.assertFalse(hasattr(parser, "__dict__"))
+        for name in ("article", "contexts", "sentences", "citation_diagnostics"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(parser, name))
 
 
 class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
@@ -154,7 +238,7 @@ class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
             directory = Path(temporary_directory)
             for filename, xml in documents.items():
                 with self.subTest(filename=filename):
-                    parser = JATSParser()
+                    parser = _ArticleParseSession()
                     path = self._write_xml(directory, filename, xml)
                     with self.assertRaises(KeyError):
                         parser.parse_tree(path)
@@ -163,16 +247,22 @@ class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
         """Record that question and exclamation marks are not boundaries yet."""
         text = "Is this supported? Yes it is! Final statement."
 
-        sentences = JATSParser._split_sentences(text)
+        sentences = _ArticleParseSession._split_sentences(text)
 
         self.assertEqual(sentences, [text])
 
     def test_alignment_mismatch_sets_query_raw_to_none(self) -> None:
         """The current parser keeps a context but drops raw text after misalignment."""
-        parser = JATSParser()
+        parser = _ArticleParseSession()
         parser.pmcid = "PMC_TEST"
         paragraph = etree.fromstring(b"<p/>")
-        sections: list[dict[str, object]] = [{"paragraphs": [paragraph]}]
+        sections = [
+            _ElementSection(
+                title="Untitled Section",
+                full_title="Untitled Section",
+                paragraphs=(paragraph,),
+            )
+        ]
         references = [
             Reference(
                 rid="R1",
@@ -183,7 +273,7 @@ class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
                 year=None,
                 title=None,
                 journal=None,
-                authors=[],
+                authors=(),
             )
         ]
         normalized = NormalizedCitationText(
@@ -208,14 +298,13 @@ class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
         self.assertEqual(len(parser.contexts), 1)
         self.assertIsNone(parser.contexts[0].query_raw)
 
-    def test_state_dependent_methods_fail_before_parse_article(self) -> None:
-        """Current result accessors expose missing state as AttributeError."""
+    def test_state_dependent_methods_are_absent_from_public_parser(self) -> None:
+        """The breaking facade exposes no state-dependent result accessors."""
         method_names = (
             "extract_metadata",
             "extract_authors",
             "extract_references",
             "extract_sections",
-            "metadata_to_dataframe",
             "sources_to_dataframe",
             "contexts_to_dataframe",
             "text_to_list",
@@ -223,14 +312,11 @@ class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
         )
         for method_name in method_names:
             with self.subTest(method=method_name):
-                parser = JATSParser()
-                method = getattr(parser, method_name)
-                with self.assertRaises(AttributeError):
-                    method()
+                self.assertFalse(hasattr(JATSParser(), method_name))
 
     def test_extract_contexts_requires_an_assigned_pmcid(self) -> None:
         """Direct context extraction reports its one explicit state precondition."""
-        parser = JATSParser()
+        parser = _ArticleParseSession()
 
         with self.assertRaisesRegex(RuntimeError, "Set parser.pmcid"):
             parser.extract_contexts([], [])
@@ -243,14 +329,14 @@ class TestCurrentArtifactSchema(unittest.TestCase):
         """Metadata shards must retain their current columns and order."""
         self.assertEqual(
             METADATA_COLUMNS,
-            ["pmcid", "pmid", "title", "abstract", "authors"],
+            ("pmcid", "pmid", "title", "abstract", "authors"),
         )
 
     def test_source_columns(self) -> None:
         """Source shards must retain their current columns and order."""
         self.assertEqual(
             SOURCE_COLUMNS,
-            [
+            (
                 "rid",
                 "label",
                 "doi",
@@ -261,14 +347,14 @@ class TestCurrentArtifactSchema(unittest.TestCase):
                 "journal",
                 "authors",
                 "source_pmcid",
-            ],
+            ),
         )
 
     def test_context_columns(self) -> None:
         """Context shards must retain their current columns and order."""
         self.assertEqual(
             CONTEXT_COLUMNS,
-            [
+            (
                 "source_pmcid",
                 "section_index",
                 "paragraph_index",
@@ -281,7 +367,7 @@ class TestCurrentArtifactSchema(unittest.TestCase):
                 "query_length",
                 "n_hits",
                 "context",
-            ],
+            ),
         )
 
 

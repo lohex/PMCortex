@@ -1,21 +1,24 @@
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
 
-import yaml
 from lxml import etree
 
-from pmcortex import jatsparser as jatsparser_module
-from pmcortex.jatsparser import JATSParser
+from pmcortex.jatsparser import JATSParser, _ArticleParseSession
 from pmcortex.models import JATSArticle, Reference
+from pmcortex.serialization import (
+    author_lists_to_payload,
+    contexts_to_dataframe,
+    normalize_author_lists,
+    references_to_dataframe,
+    render_positioned_sentences,
+)
 
 from tests._shared import EXAMPLE_PMCIDS, existing_example_files
 
 
 class TestJATSParser(unittest.TestCase):
     @staticmethod
-    def _parser_from_xml(xml: str) -> JATSParser:
-        parser = JATSParser()
+    def _parser_from_xml(xml: str) -> _ArticleParseSession:
+        parser = _ArticleParseSession()
         parser.root = etree.fromstring(xml.encode("utf-8"), parser=parser._xml_parser)
         parser.namespaces = {"j": parser.root.nsmap[None]}
         return parser
@@ -26,11 +29,12 @@ class TestJATSParser(unittest.TestCase):
         self.assertNotIn("PMC440378", existing)
         self.assertEqual(sorted(existing.keys()), sorted([p for p in EXAMPLE_PMCIDS if p != "PMC440378"]))
 
-    def test_parse_article_for_available_examples(self) -> None:
+    def test_parse_for_available_examples(self) -> None:
         parser = JATSParser()
         for pmcid, path in existing_example_files().items():
             with self.subTest(pmcid=pmcid):
-                article = parser.parse_article(path, pmcid=pmcid)
+                result = parser.parse(path, expected_pmcid=pmcid)
+                article = result.article
                 self.assertEqual(article.pmcid, pmcid)
                 self.assertTrue(article.title)
                 self.assertGreater(len(article.references), 0)
@@ -38,9 +42,8 @@ class TestJATSParser(unittest.TestCase):
 
     def test_contexts_to_dataframe_has_expected_columns(self) -> None:
         pmcid, path = next(iter(existing_example_files().items()))
-        parser = JATSParser()
-        parser.parse_article(path, pmcid=pmcid)
-        df = parser.contexts_to_dataframe()
+        result = JATSParser().parse(path, expected_pmcid=pmcid)
+        df = contexts_to_dataframe(result.contexts)
 
         expected = {
             "source_pmcid",
@@ -74,7 +77,7 @@ class TestJATSParser(unittest.TestCase):
         )
         parser.pmcid = "PMC_TEST"
         sections = parser.extract_sections()
-        references = [
+        references = (
             Reference(
                 rid="R1",
                 label="1",
@@ -84,19 +87,27 @@ class TestJATSParser(unittest.TestCase):
                 year=None,
                 title=None,
                 journal=None,
-                authors=[],
-            )
-        ]
+                authors=(),
+            ),
+        )
 
-        parser.extract_contexts(sections, references, save_sentences=True)
+        parser.extract_contexts(tuple(sections), references, save_sentences=True)
 
-        context = parser.contexts_to_dataframe().iloc[0]
+        context = contexts_to_dataframe(tuple(parser.contexts)).iloc[0]
         self.assertEqual(context["source_pmcid"], "PMC_TEST")
         self.assertEqual(context["section_index"], 0)
         self.assertEqual(context["paragraph_index"], 0)
         self.assertEqual(context["sentence_index"], 1)
         self.assertEqual(
-            parser.text_to_list().splitlines(),
+            parser.contexts[0].position,
+            parser.sentences[1].position,
+        )
+        self.assertEqual(
+            parser.contexts[0].position.sentence_id,
+            "PMC_TEST/0/0/1",
+        )
+        self.assertEqual(
+            render_positioned_sentences(tuple(parser.sentences)).splitlines(),
             [
                 (
                     "0/0/0\tFirst sentence."
@@ -109,16 +120,15 @@ class TestJATSParser(unittest.TestCase):
 
     def test_sources_to_dataframe_has_reference_fields(self) -> None:
         pmcid, path = next(iter(existing_example_files().items()))
-        parser = JATSParser()
-        parser.parse_article(path, pmcid=pmcid)
-        df = parser.sources_to_dataframe()
+        result = JATSParser().parse(path, expected_pmcid=pmcid)
+        df = references_to_dataframe(pmcid, result.article.references)
 
         expected = {"rid", "label", "doi", "pmid", "pmcid", "year", "title", "journal", "authors"}
         self.assertTrue(expected.issubset(set(df.columns)))
 
     def test_split_sentences_does_not_split_inside_dotted_abbreviations(self) -> None:
         text = "This was conducted in the U.S. cohort."
-        sentences = JATSParser._split_sentences(text)
+        sentences = _ArticleParseSession._split_sentences(text)
 
         self.assertEqual(
             sentences,
@@ -229,12 +239,12 @@ class TestJATSParser(unittest.TestCase):
         flattened = [
             text
             for section in sections
-            for paragraph in section["paragraphs"]
+            for paragraph in section.paragraphs
             for text in parser._replace_refs(paragraph)
         ]
 
         self.assertEqual(
-            [section["full_title"] for section in sections],
+            [section.full_title for section in sections],
             ["Untitled Section", "Results", "Untitled Section"],
         )
         self.assertEqual(
@@ -242,18 +252,14 @@ class TestJATSParser(unittest.TestCase):
             ["Intro text.", "Nested section text.", "Closing text."],
         )
 
-    @unittest.skipIf(
-        not hasattr(jatsparser_module, "save_author_lists_to_yaml"),
-        "save_author_lists_to_yaml is not available in pmcortex.jatsparser",
-    )
-    def test_save_author_lists_to_yaml_writes_expected_structure(self) -> None:
+    def test_normalize_author_lists_returns_expected_structure(self) -> None:
         article = JATSArticle(
             pmcid="PMC1",
             pmid=None,
             title="Example",
             abstract=None,
-            authors=["Smith John", "Miller Anne"],
-            references=[
+            authors=("Smith John", "Miller Anne"),
+            references=(
                 Reference(
                     rid="R1",
                     label="1",
@@ -263,7 +269,7 @@ class TestJATSParser(unittest.TestCase):
                     year=None,
                     title="Ref 1",
                     journal="Journal",
-                    authors="Doe Jane, Roe Richard",
+                    authors=("Doe Jane", "Roe Richard"),
                 ),
                 Reference(
                     rid="R2",
@@ -274,16 +280,13 @@ class TestJATSParser(unittest.TestCase):
                     year=None,
                     title="Ref 2",
                     journal="Journal",
-                    authors=["Brown Alice"],
+                    authors=("Brown Alice",),
                 ),
-            ],
-            sections={},
+            ),
+            sections=(),
         )
 
-        with TemporaryDirectory() as tmpdir:
-            output = jatsparser_module.save_author_lists_to_yaml(article, Path(tmpdir) / "authors.yaml")
-            with output.open(encoding="utf-8") as handle:
-                data = yaml.safe_load(handle)
+        data = author_lists_to_payload(normalize_author_lists(article))
 
         self.assertEqual(
             data,

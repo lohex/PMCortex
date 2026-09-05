@@ -143,14 +143,25 @@ pmc_context_queries_v1/
 ### Parse an article into retrieval data
 
 ```python
-from pmcortex import JATSParser
+from pmcortex import (
+    JATSParser,
+    contexts_to_dataframe,
+    metadata_to_dataframe,
+    references_to_dataframe,
+)
 
-parser = JATSParser()
-article = parser.parse_article("data/pmc_jats/PMC5513360.nxml")
+result = JATSParser().parse(
+    "data/pmc_jats/PMC5513360.nxml",
+    expected_pmcid="PMC5513360",
+    include_sentences=True,
+)
 
-metadata = parser.metadata_to_dataframe()
-sources = parser.sources_to_dataframe()
-contexts = parser.contexts_to_dataframe()
+metadata = metadata_to_dataframe(result.article)
+sources = references_to_dataframe(
+    result.article.pmcid,
+    result.article.references,
+)
+contexts = contexts_to_dataframe(result.contexts)
 
 print(contexts[["query", "hits"]].head())
 ```

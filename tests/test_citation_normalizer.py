@@ -10,8 +10,14 @@ from pmcortex.citation_normalizer import (
     CitationNormalizer,
     NormalizedCitationText,
 )
-from pmcortex.jatsparser import JATSParser
-from pmcortex.models import PositionedSentence, Reference
+from pmcortex.jatsparser import _ArticleParseSession
+from pmcortex.models import (
+    CitationCleanupAction,
+    PositionedSentence,
+    Reference,
+    SentencePosition,
+)
+from pmcortex.serialization import render_positioned_sentences
 
 
 class TestCitationNormalizer(unittest.TestCase):
@@ -152,17 +158,20 @@ class TestCitationNormalizer(unittest.TestCase):
 
         self.assertEqual(query, "Call foo() and retain [] before.")
 
-        parser = JATSParser()
+        parser = _ArticleParseSession()
         parser.sentences = [
             PositionedSentence(
-                section_index=0,
-                paragraph_index=0,
-                sentence_index=0,
+                position=SentencePosition(
+                    source_pmcid="PMC_TEST",
+                    section_index=0,
+                    paragraph_index=0,
+                    sentence_index=0,
+                ),
                 text="Call foo() and retain [].",
             )
         ]
         self.assertEqual(
-            parser.text_to_list(),
+            render_positioned_sentences(tuple(parser.sentences)),
             "0/0/0\tCall foo() and retain [].",
         )
 
@@ -279,7 +288,7 @@ class TestCitationNormalizer(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            JATSParser._split_sentences(
+            _ArticleParseSession._split_sentences(
                 separate_citations_result.text_with_markers
             ),
             [
@@ -497,7 +506,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
 
     def test_jatsparser_expands_range_and_aligns_query_with_fulltext(self) -> None:
         """Parser integration must retain every resolvable positive in a range."""
-        parser = JATSParser()
+        parser = _ArticleParseSession()
         parser.root = etree.fromstring(
             b"""
             <article xmlns="http://jats.nlm.nih.gov">
@@ -524,7 +533,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
                 year=None,
                 title=None,
                 journal=None,
-                authors=[],
+                authors=(),
             )
             for number in range(1, 4)
         ]
@@ -537,16 +546,16 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
 
         self.assertEqual(len(parser.contexts), 1)
         self.assertEqual(parser.contexts[0].query, "Evidence supports this.")
-        self.assertEqual(parser.contexts[0].hits, ["101", "102", "103"])
+        self.assertEqual(parser.contexts[0].hits, ("101", "102", "103"))
         self.assertEqual(parser.contexts[0].n_hits, 3)
         self.assertEqual(
-            parser.text_to_list(),
+            render_positioned_sentences(tuple(parser.sentences)),
             "0/0/0\tEvidence [xref:R1], [xref:R2], [xref:R3] supports this.",
         )
 
     def test_parser_keeps_clean_parenthetical_query_and_rejects_narrative(self) -> None:
         """Only structurally safe semantic citations may become contexts."""
-        parser = JATSParser()
+        parser = _ArticleParseSession()
         parser.root = etree.fromstring(
             b"""
             <article xmlns="http://jats.nlm.nih.gov">
@@ -574,7 +583,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
                 year=2019 + number,
                 title=None,
                 journal=None,
-                authors=[],
+                authors=(),
             )
             for number in range(1, 3)
         ]
@@ -590,17 +599,17 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
         self.assertEqual(parser.contexts[0].query_raw, "Safe claim (Smith, 2020).")
         self.assertEqual(
             parser.contexts[0].citation_forms,
-            [CitationForm.PARENTHETICAL_AUTHOR_YEAR.value],
+            (CitationForm.PARENTHETICAL_AUTHOR_YEAR.value,),
         )
         self.assertEqual(
             parser.contexts[0].citation_cleanup_action,
-            "removed_parenthetical_citation",
+            CitationCleanupAction.REMOVED_PARENTHETICAL_CITATION,
         )
         self.assertEqual(parser.unsafe_citation_rejections, 1)
 
     def test_citation_after_period_stays_with_preceding_sentence(self) -> None:
         """A post-period xref must retain the cited sentence's structural index."""
-        parser = JATSParser()
+        parser = _ArticleParseSession()
         parser.root = etree.fromstring(
             b"""
             <article xmlns="http://jats.nlm.nih.gov">
@@ -623,7 +632,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
                 year=None,
                 title=None,
                 journal=None,
-                authors=[],
+                authors=(),
             )
         ]
 
@@ -635,9 +644,9 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
 
         self.assertEqual(len(parser.contexts), 1)
         self.assertEqual(parser.contexts[0].query, "First claim.")
-        self.assertEqual(parser.contexts[0].sentence_index, 0)
+        self.assertEqual(parser.contexts[0].position.sentence_index, 0)
         self.assertEqual(
-            parser.text_to_list().splitlines(),
+            render_positioned_sentences(tuple(parser.sentences)).splitlines(),
             [
                 "0/0/0\tFirst claim. [xref:R1]",
                 "0/0/1\tSecond sentence.",
@@ -647,25 +656,25 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
     def test_sentence_splitting_handles_et_al_and_retained_range_separators(self) -> None:
         """Post-period markers must not suppress a following sentence boundary."""
         self.assertEqual(
-            JATSParser._split_sentences(
+            _ArticleParseSession._split_sentences(
                 "Smith et al. [xref:R1] Subsequent work continued."
             ),
             ["Smith et al. [xref:R1]", "Subsequent work continued."],
         )
         self.assertEqual(
-            JATSParser._split_sentences(
+            _ArticleParseSession._split_sentences(
                 "Smith et al. (2020) reported this result."
             ),
             ["Smith et al. (2020) reported this result."],
         )
         self.assertEqual(
-            JATSParser._split_sentences(
+            _ArticleParseSession._split_sentences(
                 "Smith et al. [xref:R1] reported this result."
             ),
             ["Smith et al. [xref:R1] reported this result."],
         )
         self.assertEqual(
-            JATSParser._split_sentences(
+            _ArticleParseSession._split_sentences(
                 "Claim. [xref:R5] – [xref:R3] Next sentence."
             ),
             ["Claim. [xref:R5] – [xref:R3]", "Next sentence."],

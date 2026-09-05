@@ -1,12 +1,11 @@
 """Parse PMC JATS XML into retrieval queries and cited documents."""
 
-from dataclasses import asdict
+from dataclasses import dataclass
 import re
 from pathlib import Path
 from typing import Iterable
 
 from lxml import etree
-import pandas as pd
 from loguru import logger
 
 from pmcortex.citation_normalizer import (
@@ -16,7 +15,17 @@ from pmcortex.citation_normalizer import (
     CitationOccurrence,
     NormalizedCitationText,
 )
-from pmcortex.models import Context, JATSArticle, PositionedSentence, Reference
+from pmcortex.models import (
+    CitationCleanupAction,
+    Context,
+    ContextExtractionResult,
+    JATSArticle,
+    JATSSection,
+    ParsedJATSResult,
+    PositionedSentence,
+    Reference,
+    SentencePosition,
+)
 
 ABBREVIATIONS = {
     "e.g.",
@@ -46,14 +55,22 @@ SKIPPED_CONTENT_TAGS = frozenset({
     "tex-math",
 })
 
-class JATSParser:
-    """
-    Parses PMC JATS (NISO JATS) .nxml files and extracts structured content.
 
-    Keep this class pure:
-    - no network
-    - no file crawling logic
-    - only parse + extract
+@dataclass(frozen=True, slots=True)
+class _ElementSection:
+    """Internal section whose paragraph elements remain available for extraction."""
+
+    title: str
+    full_title: str
+    paragraphs: tuple[etree._Element, ...]
+
+
+class _ArticleParseSession:
+    """
+    Hold temporary mutable state while parsing exactly one JATS article.
+
+    The public :class:`JATSParser` creates a fresh session for every call and
+    exposes only the resulting immutable dataclasses.
     """
 
     def __init__(self) -> None:
@@ -66,44 +83,54 @@ class JATSParser:
         )
         self.last_context = None
 
-    def parse_article(
+    def parse(
         self,
-        path: str | Path,
+        article_path: Path,
         *,
-        pmcid: str | None = None,
-        save_sentences: bool = False,
-    ) -> JATSArticle:
+        expected_pmcid: str | None,
+        include_sentences: bool,
+    ) -> ParsedJATSResult:
         """
-        Parse one article file and return a structured `JATSArticle`.
+        Parse one validated article path into immutable public result models.
 
-        Besides the returned dataclass, this method also populates parser state:
-        `self.root`, `self.namespaces` and `self.contexts`.
+        This internal method may use mutable session state. Callers receive no
+        reference to the session after the result has been assembled.
         """
-        article_path = Path(path)
-        if not article_path.is_file():
-            raise FileNotFoundError(f"JATS article not found: {article_path}")
-
         self.parse_tree(article_path)
         title, abstract, extracted_pmcid, pmid = self.extract_metadata()
         article_pmcid = extracted_pmcid
         if article_pmcid is None:
-            article_pmcid = pmcid if pmcid is not None else article_path.stem
+            article_pmcid = (
+                expected_pmcid
+                if expected_pmcid is not None
+                else article_path.stem
+            )
         self.pmcid = article_pmcid
-        logger.info(f"Parsed article {article_pmcid} with title '{title}'")
+        logger.info("Parsed article {} with title {!r}", article_pmcid, title)
 
-        authors = self.extract_authors()        
-        references = self.extract_references()
-        sections = self.extract_sections()
-        logger.info(f"Extracted {len(references)} references and {len(sections)} sections from {path}")
+        authors = tuple(self.extract_authors())
+        references = tuple(self.extract_references())
+        element_sections = tuple(self.extract_sections())
+        logger.info(
+            "Extracted {} references and {} sections from {}",
+            len(references),
+            len(element_sections),
+            article_path,
+        )
 
         self.extract_contexts(
-            sections,
+            element_sections,
             references,
-            save_sentences=save_sentences,
+            save_sentences=include_sentences,
         )
-        logger.info(f"Extracted {len(self.contexts)} contexts from {path}.")
+        logger.info(
+            "Extracted {} contexts from {}.",
+            len(self.contexts),
+            article_path,
+        )
 
-        self.article = JATSArticle(
+        sections = self._to_public_sections(element_sections, references)
+        article = JATSArticle(
             pmcid=article_pmcid,
             pmid=pmid,
             title=title,
@@ -112,9 +139,14 @@ class JATSParser:
             references=references,
             sections=sections,
         )
+        extraction = ContextExtractionResult(
+            contexts=tuple(self.contexts),
+            sentences=tuple(self.sentences),
+            diagnostics=tuple(self.citation_diagnostics),
+            unsafe_citation_rejection_count=self.unsafe_citation_rejections,
+        )
+        return ParsedJATSResult(article=article, extraction=extraction)
 
-        return self.article
-    
     def extract_metadata(
         self,
     ) -> tuple[str | None, str | None, str | None, str | None]:
@@ -144,13 +176,6 @@ class JATSParser:
             pmcid = "PMC" + pmcid
 
         return title, abstract, pmcid, pmid
-
-    def metadata_to_dataframe(self) -> pd.DataFrame:
-        """Return the current article metadata as a one-row DataFrame."""
-        metadata = asdict(self.article)
-        metadata.pop("references")
-        metadata.pop("sections")
-        return pd.DataFrame([metadata])
 
     # -----------------------
     # Author extraction
@@ -230,18 +255,13 @@ class JATSParser:
                     year=int(year) if year and year.isdigit() else None,
                     title=title,
                     journal=journal,
-                    authors=authors,
+                    authors=tuple(authors),
                 )
             )
          
         return references
     
         
-    def sources_to_dataframe(self) -> pd.DataFrame:
-        """Convert extracted references to a pandas DataFrame."""
-        return pd.DataFrame([asdict(reference) for reference in self.article.references])
-
-
     def _extract_authors(self, cit: etree._Element) -> list[str]:
         """
         Extract author names from a citation node.
@@ -309,46 +329,15 @@ class JATSParser:
             
         return None
 
-    @staticmethod
-    def _short_author_name(name: str) -> str:
-        """Convert `Surname Given` into `Surname G`."""
-        parts = [part for part in name.split() if part]
-        if not parts:
-            return ""
-        if len(parts) == 1:
-            return parts[0]
-        return f"{parts[0]} {parts[1][0]}"
-
-    @staticmethod
-    def _coerce_author_names(authors: str | Iterable[str]) -> list[str]:
-        """Normalize reference authors into a list of non-empty names."""
-        if isinstance(authors, str):
-            return [name.strip() for name in authors.split(",") if name.strip()]
-        return [str(name).strip() for name in authors if str(name).strip()]
-
-
-    def normalized_authors_and_refs(self) -> dict:
-        """
-        Save the notebook-style `authors` and `cited_authors` lists to YAML.
-        """
-        payload = {
-            "authors": [self._short_author_name(name) for name in self.article.authors],
-            "cited_authors": [
-                [self._short_author_name(name) for name in self._coerce_author_names(reference.authors)]
-                for reference in self.article.references
-            ],
-        }
-        return payload
-
     # -----------------------
     # Sections extraction
     # -----------------------
 
-    def extract_sections(self) -> list[dict]:
+    def extract_sections(self) -> list[_ElementSection]:
         """
         Alternative to extract_sections that keeps paragraphs separate.
         """
-        sections: list[dict] = []
+        sections: list[_ElementSection] = []
         body = self._find_element(".//j:body")
         if body is None:
             return sections
@@ -359,11 +348,13 @@ class JATSParser:
             """Append and clear paragraphs found directly under the body."""
             if not body_paragraphs:
                 return
-            sections.append({
-                "paragraphs": list(body_paragraphs),
-                "title": "Untitled Section",
-                "full_title": "Untitled Section",
-            })
+            sections.append(
+                _ElementSection(
+                    title="Untitled Section",
+                    full_title="Untitled Section",
+                    paragraphs=tuple(body_paragraphs),
+                )
+            )
             body_paragraphs.clear()
 
         for child in body:
@@ -379,20 +370,20 @@ class JATSParser:
 
         return sections
 
-    def _extract_sections_paragraphs(self,
-                                     parent: etree._Element,
-                                     parent_titles: list[str] = None,
-                                     ) -> list[dict]:
+    def _extract_sections_paragraphs(
+        self,
+        parent: etree._Element,
+        parent_titles: list[str] | None = None,
+    ) -> list[_ElementSection]:
         """
         Recursively collect section paragraphs and hierarchical titles.
 
-        Returns one or more section dictionaries with `paragraphs`, `title`,
-        and `full_title`.
+        Returns typed internal sections with paragraphs and hierarchical titles.
         """
         title_obj = self._find_element("./j:title", parent)
         title = self._flatten_text(title_obj) or "Untitled Section"
-        paragraphs = []
-        sections = []
+        paragraphs: list[etree._Element] = []
+        sections: list[_ElementSection] = []
         if parent_titles is None:
             parent_titles = []
 
@@ -404,16 +395,46 @@ class JATSParser:
                 paragraphs.append(child)
             elif child_name == "sec":
                 # Recursively extract subsections
-                subsections = self._extract_sections_paragraphs(child, parent_titles + [title])
+                subsections = self._extract_sections_paragraphs(
+                    child,
+                    parent_titles + [title],
+                )
                 sections.extend(subsections)
 
-        sections.append({
-            'paragraphs': paragraphs,
-            'title': title,
-            'full_title': " > ".join(parent_titles + [title])
-        })
+        sections.append(
+            _ElementSection(
+                paragraphs=tuple(paragraphs),
+                title=title,
+                full_title=" > ".join(parent_titles + [title]),
+            )
+        )
 
         return sections
+
+    def _to_public_sections(
+        self,
+        sections: tuple[_ElementSection, ...],
+        references: tuple[Reference, ...],
+    ) -> tuple[JATSSection, ...]:
+        """Convert XML-bearing internal sections into immutable public values."""
+        normalizer = self._build_citation_normalizer(references)
+        public_sections: list[JATSSection] = []
+        for section in sections:
+            source_blocks = tuple(
+                " ".join(
+                    normalized.text_with_markers
+                    for normalized in self._normalize_refs(paragraph, normalizer)
+                )
+                for paragraph in section.paragraphs
+            )
+            public_sections.append(
+                JATSSection(
+                    title=section.title,
+                    full_title=section.full_title,
+                    source_blocks=source_blocks,
+                )
+            )
+        return tuple(public_sections)
     
     def _replace_refs(
         self,
@@ -488,7 +509,7 @@ class JATSParser:
         which preserves grammatical punctuation and author-year expressions.
         """
         normalized = in_string.replace("\n", " ").replace("▪", " ")
-        return JATSParser._normalize_text(normalized)
+        return _ArticleParseSession._normalize_text(normalized)
 
     @staticmethod
     def _split_sentences(text: str) -> list[str]:
@@ -615,7 +636,7 @@ class JATSParser:
             self.unsafe_citation_rejections += 1
             return None
 
-        pmid_hits = list(dict.fromkeys(
+        pmid_hits = tuple(dict.fromkeys(
             ref_id_to_pmid[rid]
             for rid in cited_rids
             if rid in ref_id_to_pmid
@@ -633,7 +654,7 @@ class JATSParser:
             for occurrence in citation_occurrences
             if cited_rid_set.intersection(occurrence.rids)
         )
-        citation_forms = list(dict.fromkeys(
+        citation_forms = tuple(dict.fromkeys(
             occurrence.form.value for occurrence in sentence_occurrences
         ))
         has_parenthetical_author_year = any(
@@ -641,19 +662,16 @@ class JATSParser:
             for occurrence in sentence_occurrences
         )
         cleanup_action = (
-            "removed_parenthetical_citation"
+            CitationCleanupAction.REMOVED_PARENTHETICAL_CITATION
             if has_parenthetical_author_year
-            else "removed_label_citation"
+            else CitationCleanupAction.REMOVED_LABEL_CITATION
         )
         raw_query = None
         if raw_sentence_text is not None:
             raw_query = normalizer.remove_markers(raw_sentence_text)
 
         context = Context(
-            source_pmcid=self.pmcid,
-            section_index=sentence.section_index,
-            paragraph_index=sentence.paragraph_index,
-            sentence_index=sentence.sentence_index,
+            position=sentence.position,
             query_raw=raw_query,
             query=clean_query,
             citation_forms=citation_forms,
@@ -669,8 +687,8 @@ class JATSParser:
 
     def extract_contexts(
         self,
-        sections: list[dict[str, object]],
-        references: list[Reference],
+        sections: tuple[_ElementSection, ...] | list[_ElementSection],
+        references: tuple[Reference, ...] | list[Reference],
         save_sentences: bool = False,
     ) -> None:
         """
@@ -698,10 +716,7 @@ class JATSParser:
             if reference.rid is not None and reference.pmid is not None
         }
         for s, section in enumerate(sections):
-            paragraphs = section["paragraphs"]
-            if not isinstance(paragraphs, list):
-                continue
-            for p, ref_paragraph in enumerate(paragraphs):
+            for p, ref_paragraph in enumerate(section.paragraphs):
                 next_sentence_index = 0
                 normalized_blocks = self._normalize_refs(ref_paragraph, normalizer)
                 for normalized in normalized_blocks:
@@ -717,9 +732,12 @@ class JATSParser:
                     )
                     sentences = [
                         PositionedSentence(
-                            section_index=s,
-                            paragraph_index=p,
-                            sentence_index=next_sentence_index + index,
+                            position=SentencePosition(
+                                source_pmcid=self.pmcid,
+                                section_index=s,
+                                paragraph_index=p,
+                                sentence_index=next_sentence_index + index,
+                            ),
                             text=sentence_text,
                         )
                         for index, sentence_text in enumerate(sentence_texts)
@@ -758,33 +776,15 @@ class JATSParser:
                 self.pmcid,
             )
 
-    def contexts_to_dataframe(self) -> pd.DataFrame:
-        """
-        Convert extracted contexts into a tabular representation.
-
-        Returns a DataFrame with query text, PMID hits, and basic query stats.
-        """
-        return pd.DataFrame([asdict(context) for context in self.contexts])
-
-    def text_to_list(self) -> str:
-        """Return positioned full-text sentences, one tab-separated line each."""
-        lines = [
-            (
-                f"{sentence.section_index}/"
-                f"{sentence.paragraph_index}/"
-                f"{sentence.sentence_index}\t"
-                f"{sentence.text}"
-            )
-            for sentence in self.sentences
-        ]
-        return '\n'.join(lines)
-
-
     # -----------------------
     # Helpers
     # -----------------------
 
-    def _find_element(self, xpath: str, context: etree._Element = None) -> etree._Element | None:
+    def _find_element(
+        self,
+        xpath: str,
+        context: etree._Element | None = None,
+    ) -> etree._Element | None:
         """
         Find a single element using the parser's JATS namespace mapping.
 
@@ -879,7 +879,7 @@ class JATSParser:
         normalizer = self._build_citation_normalizer(())
         return self._normalize_caption(element, normalizer).text_with_markers
 
-    def _flatten_text(self, element: etree._Element) -> str | None:
+    def _flatten_text(self, element: etree._Element | None) -> str | None:
         """
         Flatten an XML element into normalized plain text.
 
@@ -903,3 +903,62 @@ class JATSParser:
         xml = Path(path).read_bytes()
         self.root = etree.fromstring(xml, parser=self._xml_parser)
         self.namespaces = {"j": self.root.nsmap[None]}
+
+
+class JATSParser:
+    """Stateless public facade for parsing one JATS document per call."""
+
+    __slots__ = ()
+
+    def parse(
+        self,
+        path: str | Path,
+        *,
+        expected_pmcid: str | None = None,
+        include_sentences: bool = False,
+    ) -> ParsedJATSResult:
+        """Parse one JATS file into a complete immutable result.
+
+        Args:
+            path: Existing JATS XML file.
+            expected_pmcid: Optional PMCID expected in the parsed document.
+                It is also used when the document contains no PMCID.
+            include_sentences: Retain positioned full-text sentences when true.
+
+        Returns:
+            Immutable article data, contexts, optional sentences, and
+            diagnostics.
+
+        Raises:
+            TypeError: If a public argument has the wrong type.
+            ValueError: If ``expected_pmcid`` is empty or disagrees with XML.
+            FileNotFoundError: If ``path`` does not identify an existing file.
+        """
+        if not isinstance(path, (str, Path)):
+            raise TypeError("path must be a string or pathlib.Path")
+        if expected_pmcid is not None and not isinstance(expected_pmcid, str):
+            raise TypeError("expected_pmcid must be a string or None")
+        if expected_pmcid is not None and not expected_pmcid.strip():
+            raise ValueError("expected_pmcid must not be empty")
+        if not isinstance(include_sentences, bool):
+            raise TypeError("include_sentences must be a bool")
+
+        article_path = Path(path)
+        if not article_path.is_file():
+            raise FileNotFoundError(f"JATS file does not exist: {article_path}")
+
+        result = _ArticleParseSession().parse(
+            article_path,
+            expected_pmcid=expected_pmcid,
+            include_sentences=include_sentences,
+        )
+        parsed_pmcid = result.article.pmcid
+        pmcid_mismatch = (
+            expected_pmcid is not None and parsed_pmcid != expected_pmcid
+        )
+        if pmcid_mismatch:
+            raise ValueError(
+                f"JATS PMCID {parsed_pmcid!r} does not match "
+                f"expected PMCID {expected_pmcid!r}"
+            )
+        return result
