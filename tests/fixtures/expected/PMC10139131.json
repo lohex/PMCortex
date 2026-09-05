@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "pmcid": "PMC10139131",
+    "pmid": "23010003",
+    "title": "Fixture article on metabolic regulation",
+    "abstract": "A compact synthetic article used to test JATS parsing.",
+    "authors": ["Patel A"]
+  },
+  "references": [
+    {
+      "rid": "R1",
+      "label": "1",
+      "doi": "10.1000/fixture.3",
+      "pmid": "31000003",
+      "pmcid": null,
+      "year": 2022,
+      "title": "Enzyme inhibition in metabolic networks",
+      "journal": "Journal of Fixture Metabolism",
+      "authors": ["Brown A"]
+    }
+  ],
+  "sections": [
+    {
+      "title": "Findings",
+      "full_title": "Findings",
+      "paragraph_count": 1
+    }
+  ],
+  "contexts": [
+    {
+      "source_pmcid": "PMC10139131",
+      "section_index": 0,
+      "paragraph_index": 0,
+      "sentence_index": 0,
+      "query_raw": "Enzyme inhibition changed cellular metabolism.",
+      "query": "Enzyme inhibition changed cellular metabolism.",
+      "citation_forms": ["label_only"],
+      "citation_cleanup_action": "removed_label_citation",
+      "hits": ["31000003"],
+      "query_length": 5,
+      "n_hits": 1,
+      "context": null
+    }
+  ],
+  "sentences": [
+    {
+      "section_index": 0,
+      "paragraph_index": 0,
+      "sentence_index": 0,
+      "text": "Enzyme inhibition changed cellular metabolism [xref:R1]."
+    }
+  ],
+  "normalized_authors_and_refs": {
+    "authors": ["Patel A"],
+    "cited_authors": [["Brown A"]]
+  },
+  "citation_diagnostics": [],
+  "unsafe_citation_rejection_count": 0
+}

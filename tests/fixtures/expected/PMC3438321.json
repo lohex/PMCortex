@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "pmcid": "PMC3438321",
+    "pmid": "23010001",
+    "title": "Fixture article on cellular signaling",
+    "abstract": "A compact synthetic article used to test JATS parsing.",
+    "authors": ["Smith J"]
+  },
+  "references": [
+    {
+      "rid": "R1",
+      "label": "1",
+      "doi": "10.1000/fixture.1",
+      "pmid": "31000001",
+      "pmcid": null,
+      "year": 2020,
+      "title": "Mechanisms of cellular signaling",
+      "journal": "Journal of Fixture Biology",
+      "authors": ["Doe J"]
+    }
+  ],
+  "sections": [
+    {
+      "title": "Results",
+      "full_title": "Results",
+      "paragraph_count": 1
+    }
+  ],
+  "contexts": [
+    {
+      "source_pmcid": "PMC3438321",
+      "section_index": 0,
+      "paragraph_index": 0,
+      "sentence_index": 0,
+      "query_raw": "Signal activity increased after treatment.",
+      "query": "Signal activity increased after treatment.",
+      "citation_forms": ["label_only"],
+      "citation_cleanup_action": "removed_label_citation",
+      "hits": ["31000001"],
+      "query_length": 5,
+      "n_hits": 1,
+      "context": null
+    }
+  ],
+  "sentences": [
+    {
+      "section_index": 0,
+      "paragraph_index": 0,
+      "sentence_index": 0,
+      "text": "Signal activity increased after treatment [xref:R1]."
+    }
+  ],
+  "normalized_authors_and_refs": {
+    "authors": ["Smith J"],
+    "cited_authors": [["Doe J"]]
+  },
+  "citation_diagnostics": [],
+  "unsafe_citation_rejection_count": 0
+}

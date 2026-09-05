@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "pmcid": "PMC10462751",
+    "pmid": "23010004",
+    "title": "Fixture article on gene expression",
+    "abstract": "A compact synthetic article used to test JATS parsing.",
+    "authors": ["Miller A"]
+  },
+  "references": [
+    {
+      "rid": "R1",
+      "label": "1",
+      "doi": "10.1000/fixture.4",
+      "pmid": "31000004",
+      "pmcid": null,
+      "year": 2023,
+      "title": "Regulation of target gene expression",
+      "journal": "Journal of Fixture Genetics",
+      "authors": ["Wilson E"]
+    }
+  ],
+  "sections": [
+    {
+      "title": "Results",
+      "full_title": "Results",
+      "paragraph_count": 1
+    }
+  ],
+  "contexts": [
+    {
+      "source_pmcid": "PMC10462751",
+      "section_index": 0,
+      "paragraph_index": 0,
+      "sentence_index": 0,
+      "query_raw": "Expression of the target gene increased significantly.",
+      "query": "Expression of the target gene increased significantly.",
+      "citation_forms": ["label_only"],
+      "citation_cleanup_action": "removed_label_citation",
+      "hits": ["31000004"],
+      "query_length": 7,
+      "n_hits": 1,
+      "context": null
+    }
+  ],
+  "sentences": [
+    {
+      "section_index": 0,
+      "paragraph_index": 0,
+      "sentence_index": 0,
+      "text": "Expression of the target gene increased significantly [xref:R1]."
+    }
+  ],
+  "normalized_authors_and_refs": {
+    "authors": ["Miller A"],
+    "cited_authors": [["Wilson E"]]
+  },
+  "citation_diagnostics": [],
+  "unsafe_citation_rejection_count": 0
+}

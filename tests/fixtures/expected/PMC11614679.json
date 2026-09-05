@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "pmcid": "PMC11614679",
+    "pmid": "23010005",
+    "title": "Fixture article on therapeutic resistance",
+    "abstract": "A compact synthetic article used to test JATS parsing.",
+    "authors": ["Nguyen K"]
+  },
+  "references": [
+    {
+      "rid": "R1",
+      "label": "1",
+      "doi": "10.1000/fixture.5",
+      "pmid": "31000005",
+      "pmcid": null,
+      "year": 2024,
+      "title": "Pathway activity in resistant cells",
+      "journal": "Journal of Fixture Therapeutics",
+      "authors": ["Rossi L"]
+    }
+  ],
+  "sections": [
+    {
+      "title": "Results",
+      "full_title": "Results",
+      "paragraph_count": 1
+    }
+  ],
+  "contexts": [
+    {
+      "source_pmcid": "PMC11614679",
+      "section_index": 0,
+      "paragraph_index": 0,
+      "sentence_index": 0,
+      "query_raw": "Resistant cells retained pathway activity.",
+      "query": "Resistant cells retained pathway activity.",
+      "citation_forms": ["label_only"],
+      "citation_cleanup_action": "removed_label_citation",
+      "hits": ["31000005"],
+      "query_length": 5,
+      "n_hits": 1,
+      "context": null
+    }
+  ],
+  "sentences": [
+    {
+      "section_index": 0,
+      "paragraph_index": 0,
+      "sentence_index": 0,
+      "text": "Resistant cells retained pathway activity [xref:R1]."
+    }
+  ],
+  "normalized_authors_and_refs": {
+    "authors": ["Nguyen K"],
+    "cited_authors": [["Rossi L"]]
+  },
+  "citation_diagnostics": [],
+  "unsafe_citation_rejection_count": 0
+}
