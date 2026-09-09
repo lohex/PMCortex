@@ -35,6 +35,7 @@ from pmcortex.serialization import (
     normalize_author_lists,
     references_to_dataframe,
     render_author_yaml,
+    render_diagnostics_json,
     render_positioned_sentences,
 )
 
@@ -185,7 +186,7 @@ class PMCIngestionPipeline:
         *,
         parser_workers: int = 4,
         delete_jats_after_success: bool = False,
-        parser_schema_version: str = "1",
+        parser_schema_version: str = "2",
         verbose: bool = False,
     ) -> None:
         """Configure ingestion without taking ownership of the downloader.
@@ -593,6 +594,10 @@ class PMCIngestionPipeline:
         self._write_dataframe(artifact_dir / "sources.csv", sources)
         self._write_dataframe(artifact_dir / "contexts.csv", contexts)
         _atomic_write_text(
+            artifact_dir / "diagnostics.json",
+            render_diagnostics_json(parsed.diagnostics),
+        )
+        _atomic_write_text(
             self.layout.fulltexts_dir / f"{article.pmcid}.txt",
             fulltext,
         )
@@ -734,6 +739,7 @@ class PMCIngestionPipeline:
             artifact_dir / "metadata.csv",
             artifact_dir / "sources.csv",
             artifact_dir / "contexts.csv",
+            artifact_dir / "diagnostics.json",
             self.layout.fulltexts_dir / f"{pmcid}.txt",
             self.layout.authors_dir / f"{pmcid}.yaml",
         )

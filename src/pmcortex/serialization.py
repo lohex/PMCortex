@@ -1,15 +1,19 @@
 """Serialize immutable parser results into the current dataset artifacts."""
 
 from dataclasses import asdict
-from typing import TypedDict
+import json
+from typing import Literal, TypedDict
 
 import pandas as pd
 import yaml
 
+from pmcortex.citation_normalizer import CitationDiagnostic
 from pmcortex.models import (
     Context,
     JATSArticle,
+    JATSDiagnostic,
     NormalizedAuthorLists,
+    ParserDiagnostic,
     PositionedSentence,
     Reference,
 )
@@ -55,6 +59,31 @@ class AuthorListsPayload(TypedDict):
 
     authors: list[str]
     cited_authors: list[list[str]]
+
+
+class CitationDiagnosticPayload(TypedDict):
+    """JSON representation of a citation-normalization diagnostic."""
+
+    kind: Literal["citation"]
+    code: str
+    rids: list[str]
+    source_line: int | None
+
+
+class ParserDiagnosticPayload(TypedDict):
+    """JSON representation of a recovered XML parser problem."""
+
+    kind: Literal["parser"]
+    code: str
+    message: str
+    line: int
+    column: int
+    level: str
+    domain: str
+    error_type: str
+
+
+type DiagnosticPayload = CitationDiagnosticPayload | ParserDiagnosticPayload
 
 
 def metadata_to_dataframe(article: JATSArticle) -> pd.DataFrame:
@@ -181,3 +210,52 @@ def render_author_yaml(author_lists: NormalizedAuthorLists) -> str:
         sort_keys=False,
         allow_unicode=False,
     )
+
+
+def diagnostics_to_payload(
+    diagnostics: tuple[JATSDiagnostic, ...],
+) -> list[DiagnosticPayload]:
+    """Convert parser result diagnostics into explicit JSON records."""
+    if not isinstance(diagnostics, tuple):
+        raise TypeError("diagnostics must be a tuple")
+    if not all(
+        isinstance(diagnostic, (CitationDiagnostic, ParserDiagnostic))
+        for diagnostic in diagnostics
+    ):
+        raise TypeError("diagnostics must contain only JATS diagnostic values")
+
+    payload: list[DiagnosticPayload] = []
+    for diagnostic in diagnostics:
+        if isinstance(diagnostic, CitationDiagnostic):
+            payload.append(
+                CitationDiagnosticPayload(
+                    kind="citation",
+                    code=diagnostic.code.value,
+                    rids=list(diagnostic.rids),
+                    source_line=diagnostic.source_line,
+                )
+            )
+        else:
+            payload.append(
+                ParserDiagnosticPayload(
+                    kind="parser",
+                    code=diagnostic.code.value,
+                    message=diagnostic.message,
+                    line=diagnostic.line,
+                    column=diagnostic.column,
+                    level=diagnostic.level,
+                    domain=diagnostic.domain,
+                    error_type=diagnostic.error_type,
+                )
+            )
+    return payload
+
+
+def render_diagnostics_json(diagnostics: tuple[JATSDiagnostic, ...]) -> str:
+    """Render recoverable parser diagnostics as human-readable JSON."""
+    return json.dumps(
+        diagnostics_to_payload(diagnostics),
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=True,
+    ) + "\n"

@@ -129,7 +129,7 @@ tables:
 ```text
 pmc_context_queries_v1/
 ├── xml_jats/                 # temporary or retained parser inputs
-├── parsed/PMC.../            # metadata, sources, and contexts per article
+├── parsed/PMC.../            # metadata, sources, contexts, diagnostics
 ├── fulltexts/PMC....txt      # positioned sentences
 ├── authors/PMC....yaml
 ├── status/PMC....json        # success or failure reason per article
@@ -181,6 +181,10 @@ with the same structural indices used by the query table:
 ```text
 0/2/1	Sentence text...
 ```
+
+Every article shard also contains `diagnostics.json`. It preserves detailed
+citation-normalization issues and XML repairs reported by libxml2; the status
+record contains their total count.
 
 For a given row in `contexts`, `hits` identifies the positive references.
 Other entries in `sources` from the same `source_pmcid` are potential hard

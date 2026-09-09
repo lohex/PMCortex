@@ -10,7 +10,7 @@ from pmcortex.citation_normalizer import (
     CitationNormalizer,
     NormalizedCitationText,
 )
-from pmcortex.jatsparser import _ArticleParseSession
+from pmcortex.jatsparser import JATSDocument, _ArticleParseSession
 from pmcortex.models import (
     CitationCleanupAction,
     PositionedSentence,
@@ -507,7 +507,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
     def test_jatsparser_expands_range_and_aligns_query_with_fulltext(self) -> None:
         """Parser integration must retain every resolvable positive in a range."""
         parser = _ArticleParseSession()
-        parser.root = etree.fromstring(
+        root = etree.fromstring(
             b"""
             <article xmlns="http://jats.nlm.nih.gov">
               <body><sec><p>Evidence [<xref ref-type="bibr" rid="R1">1</xref>
@@ -521,7 +521,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
             """,
             parser=parser._xml_parser,
         )
-        parser.namespaces = {"j": parser.root.nsmap[None]}
+        parser.document = JATSDocument.from_root(root)
         parser.pmcid = "PMC_TEST"
         references = [
             Reference(
@@ -556,7 +556,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
     def test_parser_keeps_clean_parenthetical_query_and_rejects_narrative(self) -> None:
         """Only structurally safe semantic citations may become contexts."""
         parser = _ArticleParseSession()
-        parser.root = etree.fromstring(
+        root = etree.fromstring(
             b"""
             <article xmlns="http://jats.nlm.nih.gov">
               <body><sec>
@@ -571,7 +571,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
             """,
             parser=parser._xml_parser,
         )
-        parser.namespaces = {"j": parser.root.nsmap[None]}
+        parser.document = JATSDocument.from_root(root)
         parser.pmcid = "PMC_TEST"
         references = [
             Reference(
@@ -610,7 +610,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
     def test_citation_after_period_stays_with_preceding_sentence(self) -> None:
         """A post-period xref must retain the cited sentence's structural index."""
         parser = _ArticleParseSession()
-        parser.root = etree.fromstring(
+        root = etree.fromstring(
             b"""
             <article xmlns="http://jats.nlm.nih.gov">
               <body><sec><p>First claim.<xref ref-type="bibr" rid="R1"><sup>1</sup></xref>
@@ -620,7 +620,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
             """,
             parser=parser._xml_parser,
         )
-        parser.namespaces = {"j": parser.root.nsmap[None]}
+        parser.document = JATSDocument.from_root(root)
         parser.pmcid = "PMC_TEST"
         references = [
             Reference(

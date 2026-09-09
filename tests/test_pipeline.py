@@ -49,7 +49,12 @@ class TestPMCIngestionPipeline(unittest.TestCase):
                 )
                 expected_artifacts = [
                     dataset_root / "parsed" / "PMC3438321" / filename
-                    for filename in ("metadata.csv", "sources.csv", "contexts.csv")
+                    for filename in (
+                        "metadata.csv",
+                        "sources.csv",
+                        "contexts.csv",
+                        "diagnostics.json",
+                    )
                 ]
                 expected_artifacts.append(
                     dataset_root / "authors" / "PMC3438321.yaml"
@@ -77,6 +82,48 @@ class TestPMCIngestionPipeline(unittest.TestCase):
                 )
                 progress = progress_factory.return_value.__enter__.return_value
                 progress.update.assert_not_called()
+            finally:
+                downloader.close()
+
+    def test_xml_recovery_diagnostic_is_persisted(self) -> None:
+        """Recovered XML details remain auditable after worker persistence."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            dataset_root = Path(temporary_directory)
+            jats_dir = dataset_root / "xml_jats"
+            jats_dir.mkdir()
+            jats_path = jats_dir / "PMC9000002.nxml"
+            jats_path.write_text(
+                "<article><front><article-meta>"
+                '<article-id pub-id-type="pmcid">PMC9000002</article-id>'
+                "</article-meta></front><body><sec><p>Broken paragraph"
+                "</sec></body></article>",
+                encoding="utf-8",
+            )
+
+            downloader = PMCJATSDownloader(jats_dir)
+            try:
+                pipeline = PMCIngestionPipeline(
+                    dataset_root,
+                    downloader,
+                    parser_workers=1,
+                    parser_schema_version="test-v2",
+                )
+                records = pipeline.parse_available()
+
+                diagnostics_path = (
+                    dataset_root
+                    / "parsed"
+                    / "PMC9000002"
+                    / "diagnostics.json"
+                )
+                diagnostics = json.loads(
+                    diagnostics_path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(records[0].status, "complete")
+                self.assertGreaterEqual(records[0].diagnostic_count, 1)
+                self.assertEqual(diagnostics[0]["kind"], "parser")
+                self.assertEqual(diagnostics[0]["code"], "xml_recovery")
+                self.assertTrue(diagnostics[0]["message"])
             finally:
                 downloader.close()
 

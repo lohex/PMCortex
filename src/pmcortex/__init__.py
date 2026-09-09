@@ -21,14 +21,17 @@ from .citation_normalizer import (
     CitationOccurrence,
     NormalizedCitationText,
 )
-from .jatsparser import JATSParser
+from .jatsparser import JATSParseError, JATSParser
 from .models import (
     CitationCleanupAction,
     Context,
     ContextExtractionResult,
     JATSArticle,
+    JATSDiagnostic,
     JATSSection,
     NormalizedAuthorLists,
+    ParserDiagnostic,
+    ParserDiagnosticCode,
     ParsedJATSResult,
     PositionedSentence,
     Reference,
@@ -60,10 +63,12 @@ from .query_filters import (
 from .serialization import (
     author_lists_to_payload,
     contexts_to_dataframe,
+    diagnostics_to_payload,
     metadata_to_dataframe,
     normalize_author_lists,
     references_to_dataframe,
     render_author_yaml,
+    render_diagnostics_json,
     render_positioned_sentences,
 )
 
@@ -81,12 +86,16 @@ __all__ = [
     "Context",
     "ContextExtractionResult",
     "JATSArticle",
+    "JATSDiagnostic",
+    "JATSParseError",
     "JATSParser",
     "JATSSection",
     "DatasetLayout",
     "MaterializedDataset",
     "NormalizedCitationText",
     "NormalizedAuthorLists",
+    "ParserDiagnostic",
+    "ParserDiagnosticCode",
     "PMCIngestionPipeline",
     "PMCSearch",
     "PMCSearchResponseError",
@@ -103,11 +112,13 @@ __all__ = [
     "assert_no_residual_citation_spoilers",
     "filter_citation_spoilers",
     "contexts_to_dataframe",
+    "diagnostics_to_payload",
     "extract_abstracts_from_pubmed_xml",
     "extract_mesh_terms_from_pubmed_xml",
     "metadata_to_dataframe",
     "normalize_author_lists",
     "references_to_dataframe",
     "render_author_yaml",
+    "render_diagnostics_json",
     "render_positioned_sentences",
 ]

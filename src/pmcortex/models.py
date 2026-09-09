@@ -185,6 +185,55 @@ class CitationCleanupAction(StrEnum):
     REMOVED_PARENTHETICAL_CITATION = "removed_parenthetical_citation"
 
 
+class ParserDiagnosticCode(StrEnum):
+    """Closed set of recoverable XML and parser-level problems."""
+
+    XML_RECOVERY = "xml_recovery"
+
+
+@dataclass(frozen=True, slots=True)
+class ParserDiagnostic:
+    """One XML parser problem recovered while reading a JATS document.
+
+    Attributes:
+        code: Stable machine-readable parser diagnosis category.
+        message: Human-readable libxml2 error message.
+        line: One-based source line, or zero when unavailable.
+        column: One-based source column, or zero when unavailable.
+        level: Libxml2 severity name.
+        domain: Libxml2 subsystem name.
+        error_type: Libxml2 error type name.
+    """
+
+    code: ParserDiagnosticCode
+    message: str
+    line: int
+    column: int
+    level: str
+    domain: str
+    error_type: str
+
+    def __post_init__(self) -> None:
+        """Validate the persisted XML error-log information."""
+        if not isinstance(self.code, ParserDiagnosticCode):
+            raise TypeError("code must be a ParserDiagnosticCode")
+        for name, value in (
+            ("message", self.message),
+            ("level", self.level),
+            ("domain", self.domain),
+            ("error_type", self.error_type),
+        ):
+            if not isinstance(value, str):
+                raise TypeError(f"{name} must be a string")
+        if not self.message.strip():
+            raise ValueError("message must not be empty")
+        _validate_nonnegative_integer("line", self.line)
+        _validate_nonnegative_integer("column", self.column)
+
+
+type JATSDiagnostic = CitationDiagnostic | ParserDiagnostic
+
+
 @dataclass(frozen=True, slots=True)
 class Context:
     """Retrieval query and cited positive documents extracted from a sentence."""
@@ -241,7 +290,7 @@ class ContextExtractionResult:
 
     contexts: tuple[Context, ...]
     sentences: tuple[PositionedSentence, ...]
-    diagnostics: tuple[CitationDiagnostic, ...]
+    diagnostics: tuple[JATSDiagnostic, ...]
     unsafe_citation_rejection_count: int
     alignment_rejection_count: int = 0
 
@@ -260,10 +309,12 @@ class ContextExtractionResult:
         if not isinstance(self.diagnostics, tuple):
             raise TypeError("diagnostics must be a tuple")
         if not all(
-            isinstance(diagnostic, CitationDiagnostic)
+            isinstance(diagnostic, (CitationDiagnostic, ParserDiagnostic))
             for diagnostic in self.diagnostics
         ):
-            raise TypeError("diagnostics must contain only CitationDiagnostic values")
+            raise TypeError(
+                "diagnostics must contain only JATS diagnostic values"
+            )
         _validate_nonnegative_integer(
             "unsafe_citation_rejection_count",
             self.unsafe_citation_rejection_count,
@@ -299,8 +350,8 @@ class ParsedJATSResult:
         return self.extraction.sentences
 
     @property
-    def diagnostics(self) -> tuple[CitationDiagnostic, ...]:
-        """Return citation diagnostics accumulated during parsing."""
+    def diagnostics(self) -> tuple[JATSDiagnostic, ...]:
+        """Return citation and XML diagnostics accumulated during parsing."""
         return self.extraction.diagnostics
 
     @property

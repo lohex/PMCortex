@@ -3,7 +3,6 @@
 from dataclasses import FrozenInstanceError, asdict
 import json
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
 from unittest.mock import patch
@@ -217,31 +216,6 @@ class TestJATSParserResultAPI(unittest.TestCase):
 
 class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
     """Record limitations that later refactoring phases intentionally change."""
-
-    @staticmethod
-    def _write_xml(directory: Path, filename: str, xml: str) -> Path:
-        """Write one temporary XML document and return its path."""
-        path = directory / filename
-        path.write_text(xml, encoding="utf-8")
-        return path
-
-    def test_parse_tree_requires_a_default_namespace(self) -> None:
-        """The current parser rejects prefixed and namespace-free JATS roots."""
-        documents = {
-            "prefixed.nxml": (
-                '<j:article xmlns:j="http://jats.nlm.nih.gov">'
-                "<j:body/></j:article>"
-            ),
-            "namespace-free.nxml": "<article><body/></article>",
-        }
-        with TemporaryDirectory() as temporary_directory:
-            directory = Path(temporary_directory)
-            for filename, xml in documents.items():
-                with self.subTest(filename=filename):
-                    parser = _ArticleParseSession()
-                    path = self._write_xml(directory, filename, xml)
-                    with self.assertRaises(KeyError):
-                        parser.parse_tree(path)
 
     def test_question_and_exclamation_marks_are_not_sentence_boundaries(self) -> None:
         """Record that question and exclamation marks are not boundaries yet."""

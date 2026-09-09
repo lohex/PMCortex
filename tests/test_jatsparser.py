@@ -2,7 +2,7 @@ import unittest
 
 from lxml import etree
 
-from pmcortex.jatsparser import JATSParser, _ArticleParseSession
+from pmcortex.jatsparser import JATSDocument, JATSParser, _ArticleParseSession
 from pmcortex.models import JATSArticle, Reference
 from pmcortex.serialization import (
     author_lists_to_payload,
@@ -19,8 +19,8 @@ class TestJATSParser(unittest.TestCase):
     @staticmethod
     def _parser_from_xml(xml: str) -> _ArticleParseSession:
         parser = _ArticleParseSession()
-        parser.root = etree.fromstring(xml.encode("utf-8"), parser=parser._xml_parser)
-        parser.namespaces = {"j": parser.root.nsmap[None]}
+        root = etree.fromstring(xml.encode("utf-8"), parser=parser._xml_parser)
+        parser.document = JATSDocument.from_root(root)
         return parser
 
     def test_example_file_availability(self) -> None:

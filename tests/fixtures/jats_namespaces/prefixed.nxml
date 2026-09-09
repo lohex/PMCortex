@@ -1,0 +1,35 @@
+<j:article xmlns:j="http://jats.nlm.nih.gov">
+  <j:front>
+    <j:article-meta>
+      <j:article-id pub-id-type="pmcid">PMC9000001</j:article-id>
+      <j:article-id pub-id-type="pmid">9000001</j:article-id>
+      <j:title-group><j:article-title>Namespace fixture</j:article-title></j:title-group>
+      <j:contrib-group>
+        <j:contrib contrib-type="author">
+          <j:name><j:surname>Example</j:surname><j:given-names>Alice</j:given-names></j:name>
+        </j:contrib>
+      </j:contrib-group>
+      <j:abstract><j:p>Namespace-independent abstract.</j:p></j:abstract>
+    </j:article-meta>
+  </j:front>
+  <j:body>
+    <j:sec>
+      <j:title>Results</j:title>
+      <j:p>Evidence <j:xref ref-type="bibr" rid="R1">1</j:xref> supports this.</j:p>
+    </j:sec>
+  </j:body>
+  <j:back>
+    <j:ref-list>
+      <j:ref id="R1">
+        <j:label>1</j:label>
+        <j:element-citation>
+          <j:person-group><j:name><j:surname>Cited</j:surname><j:given-names>Bob</j:given-names></j:name></j:person-group>
+          <j:article-title>Cited work</j:article-title>
+          <j:source>Example Journal</j:source>
+          <j:year>2024</j:year>
+          <j:pub-id pub-id-type="pmid">12345678</j:pub-id>
+        </j:element-citation>
+      </j:ref>
+    </j:ref-list>
+  </j:back>
+</j:article>

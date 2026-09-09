@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 import re
 from pathlib import Path
-from typing import Iterable
+from types import MappingProxyType
+from typing import Iterable, Mapping, cast
 
 from lxml import etree
 from loguru import logger
@@ -22,6 +23,8 @@ from pmcortex.models import (
     JATSArticle,
     JATSSection,
     ParsedJATSResult,
+    ParserDiagnostic,
+    ParserDiagnosticCode,
     PositionedSentence,
     Reference,
     SentencePosition,
@@ -56,6 +59,98 @@ SKIPPED_CONTENT_TAGS = frozenset({
 })
 
 
+class JATSParseError(ValueError):
+    """A technically readable XML document is not a JATS article."""
+
+
+@dataclass(frozen=True, slots=True)
+class JATSDocument:
+    """Parsed JATS root and namespace-aware central selector configuration."""
+
+    root: etree._Element
+    namespace_uri: str | None
+    selector_namespaces: Mapping[str, str]
+
+    @classmethod
+    def from_root(cls, root: etree._Element) -> "JATSDocument":
+        """Create a selector-ready document from an XML root element."""
+        namespace_uri = cast(str | None, etree.QName(root).namespace)
+        namespace_values = (
+            {"j": namespace_uri} if namespace_uri is not None else {}
+        )
+        return cls(
+            root=root,
+            namespace_uri=namespace_uri,
+            selector_namespaces=MappingProxyType(namespace_values),
+        )
+
+    def find(
+        self,
+        selector: str,
+        context: etree._Element | None = None,
+    ) -> etree._Element | None:
+        """Find the first matching element with or without a JATS namespace."""
+        search_root = self.root if context is None else context
+        effective_selector = self._effective_selector(selector)
+        return search_root.find(
+            effective_selector,
+            namespaces=dict(self.selector_namespaces),
+        )
+
+    def findall(
+        self,
+        selector: str,
+        context: etree._Element | None = None,
+    ) -> tuple[etree._Element, ...]:
+        """Find all matching elements with or without a JATS namespace."""
+        search_root = self.root if context is None else context
+        effective_selector = self._effective_selector(selector)
+        return tuple(
+            search_root.findall(
+                effective_selector,
+                namespaces=dict(self.selector_namespaces),
+            )
+        )
+
+    def findtext(
+        self,
+        selector: str,
+        context: etree._Element | None = None,
+    ) -> str | None:
+        """Return direct text from the first namespace-compatible element."""
+        search_root = self.root if context is None else context
+        effective_selector = self._effective_selector(selector)
+        return search_root.findtext(
+            effective_selector,
+            namespaces=dict(self.selector_namespaces),
+        )
+
+    def xpath(
+        self,
+        selector: str,
+        context: etree._Element | None = None,
+    ) -> tuple[etree._Element, ...]:
+        """Evaluate an element-returning XPath with central namespace handling."""
+        search_root = self.root if context is None else context
+        effective_selector = self._effective_selector(selector)
+        raw_results = cast(
+            list[object],
+            search_root.xpath(
+                effective_selector,
+                namespaces=dict(self.selector_namespaces),
+            ),
+        )
+        if not all(isinstance(result, etree._Element) for result in raw_results):
+            raise TypeError("JATSDocument.xpath supports only element results")
+        return tuple(cast(etree._Element, result) for result in raw_results)
+
+    def _effective_selector(self, selector: str) -> str:
+        """Remove the internal prefix only for namespace-free documents."""
+        if self.namespace_uri is None:
+            return selector.replace("j:", "")
+        return selector
+
+
 @dataclass(frozen=True, slots=True)
 class _ElementSection:
     """Internal section whose paragraph elements remain available for extraction."""
@@ -74,14 +169,24 @@ class _ArticleParseSession:
     """
 
     def __init__(self) -> None:
-        """Initialize the XML parser configuration used for all parses."""
+        """Initialize the hardened XML parser used for one article.
+
+        Entity resolution, DTD loading, and network access are disabled.
+        Comments are removed because they are not article content. Recovery is
+        enabled for robust PMC processing and every recovery error is retained
+        as a :class:`ParserDiagnostic`. ``huge_tree=True`` relaxes libxml2 size
+        and depth limits for unusually large trusted PMC documents.
+        """
         self._xml_parser = etree.XMLParser(
             recover=True,
             resolve_entities=False,
+            load_dtd=False,
+            no_network=True,
             huge_tree=True,
             remove_comments=True,
         )
-        self.last_context = None
+        self.last_context: str | None = None
+        self.parser_diagnostics: tuple[ParserDiagnostic, ...] = ()
 
     def parse(
         self,
@@ -142,7 +247,9 @@ class _ArticleParseSession:
         extraction = ContextExtractionResult(
             contexts=tuple(self.contexts),
             sentences=tuple(self.sentences),
-            diagnostics=tuple(self.citation_diagnostics),
+            diagnostics=(
+                self.parser_diagnostics + tuple(self.citation_diagnostics)
+            ),
             unsafe_citation_rejection_count=self.unsafe_citation_rejections,
         )
         return ParsedJATSResult(article=article, extraction=extraction)
@@ -166,8 +273,14 @@ class _ArticleParseSession:
         abstract_obj = self._find_element(".//j:article-meta//j:abstract")
         abstract = self._flatten_text(abstract_obj)
 
-        pmid_obj = self.root.findall(".//j:article-meta/j:article-id", namespaces=self.namespaces)
-        pmid_article_ids = [o for o in pmid_obj if o.get('pub-id-type') == 'pmid']
+        article_ids = self.document.findall(
+            ".//j:article-meta/j:article-id"
+        )
+        pmid_article_ids = [
+            element
+            for element in article_ids
+            if element.get("pub-id-type") == "pmid"
+        ]
         pmid = pmid_article_ids[0].text if pmid_article_ids else None
             
         pmcid_obj = self._find_element(".//j:article-meta//j:article-id[@pub-id-type='pmcid']")
@@ -187,14 +300,22 @@ class _ArticleParseSession:
         Reads `<name>` entries first and falls back to `<string-name>`.
         """
         authors: list[str] = []
-        for name in self.root.findall(".//j:article-meta//j:contrib-group//j:contrib[@contrib-type='author']//j:name", namespaces=self.namespaces):
+        names = self.document.findall(
+            ".//j:article-meta//j:contrib-group//"
+            "j:contrib[@contrib-type='author']//j:name"
+        )
+        for name in names:
             author = self._extract_author_name(name)
             if author:
                 authors.append(author)
 
         if not authors:
-            for sn in self.root.findall(".//j:article-meta//j:contrib-group//j:contrib[@contrib-type='author']//j:string-name", namespaces=self.namespaces):
-                author = self._extract_author_name(sn)
+            string_names = self.document.findall(
+                ".//j:article-meta//j:contrib-group//"
+                "j:contrib[@contrib-type='author']//j:string-name"
+            )
+            for string_name in string_names:
+                author = self._extract_author_name(string_name)
                 if author:
                     authors.append(author)
 
@@ -212,15 +333,15 @@ class _ArticleParseSession:
           <ref id="R1"><mixed-citation>...</mixed-citation></ref>
         """
         references: list[Reference] = []
-        for ref in self.root.findall(".//j:back//j:ref-list//j:ref", namespaces=self.namespaces):
+        for ref in self.document.findall(".//j:back//j:ref-list//j:ref"):
             rid = ref.get("id")
 
             label_obj = self._find_element(".//j:label", ref)
             label = self._flatten_text(label_obj)
 
-            cit = ref.find(".//j:element-citation", namespaces=self.namespaces)
+            cit = self.document.find(".//j:element-citation", ref)
             if cit is None:
-                cit = ref.find(".//j:mixed-citation", namespaces=self.namespaces)
+                cit = self.document.find(".//j:mixed-citation", ref)
             if cit is None:
                 continue
 
@@ -269,14 +390,14 @@ class _ArticleParseSession:
         Reads `<name>` entries first and falls back to `<string-name>`.
         """
         authors: list[str] = []
-        for name in cit.findall(".//j:name", namespaces=self.namespaces):
+        for name in self.document.findall(".//j:name", cit):
             author = self._extract_author_name(name)
             if author:
                 authors.append(author)
 
         if not authors:
-            for sn in cit.findall(".//j:string-name", namespaces=self.namespaces):
-                author = self._extract_author_name(sn)
+            for string_name in self.document.findall(".//j:string-name", cit):
+                author = self._extract_author_name(string_name)
                 if author:
                     authors.extend(
                         part.strip() for part in author.split(",") if part.strip()
@@ -286,8 +407,8 @@ class _ArticleParseSession:
 
     def _extract_author_name(self, element: etree._Element) -> str:
         """Extract and normalize one structured or string author name."""
-        surname_text = element.findtext("j:surname", namespaces=self.namespaces)
-        given_text = element.findtext("j:given-names", namespaces=self.namespaces)
+        surname_text = self.document.findtext("j:surname", element)
+        given_text = self.document.findtext("j:given-names", element)
         surname = "" if surname_text is None else surname_text.strip()
         given = "" if given_text is None else given_text.strip()
 
@@ -314,7 +435,7 @@ class _ArticleParseSession:
             return None
         
         # <pub-id pub-id-type="doi">10.1234/...</pub-id>
-        for element in node.findall(".//j:pub-id", namespaces=self.namespaces):
+        for element in self.document.findall(".//j:pub-id", node):
             if (element.get("pub-id-type") or "").lower() == pub_id_type.lower():
                 text = (element.text or "").strip()
                 if text:
@@ -786,15 +907,11 @@ class _ArticleParseSession:
         context: etree._Element | None = None,
     ) -> etree._Element | None:
         """
-        Find a single element using the parser's JATS namespace mapping.
+        Find one element through the document's namespace-aware selector.
 
-        If no context is provided, the search runs from `self.root`.
+        If no context is provided, the search runs from the document root.
         """
-        if context is None:
-            context = self.root
-
-        element = context.find(xpath, namespaces=self.namespaces)
-        return element
+        return self.document.find(xpath, context)
 
     @staticmethod
     def _local_name(element: etree._Element) -> str:
@@ -826,21 +943,20 @@ class _ArticleParseSession:
         reference_order: list[str] = []
         reference_labels: dict[str, str | None] = {}
 
-        if hasattr(self, "root"):
-            ref_elements = self.root.xpath(
-                ".//*[local-name()='back']//*[local-name()='ref-list']"
-                "//*[local-name()='ref'][@id]"
+        if hasattr(self, "document"):
+            ref_elements = self.document.findall(
+                ".//j:back//j:ref-list//j:ref"
             )
             for ref_element in ref_elements:
                 rid = ref_element.get("id")
                 if not rid:
                     continue
                 reference_order.append(rid)
-                label_elements = ref_element.xpath("./*[local-name()='label']")
-                label = None
-                if label_elements:
+                label_element = self.document.find("./j:label", ref_element)
+                label: str | None = None
+                if label_element is not None:
                     label = self._normalize_text(
-                        "".join(label_elements[0].itertext())
+                        "".join(label_element.itertext())
                     )
                 reference_labels[rid] = label
 
@@ -893,16 +1009,46 @@ class _ArticleParseSession:
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
-    def parse_tree(self, path: str | Path) -> etree._Element:
-        """
-        Parse a JATS XML file and initialize parser state.
+    def parse_tree(self, path: str | Path) -> JATSDocument:
+        """Parse XML and return a namespace-aware JATS document.
 
-        Sets `self.root` to the parsed XML root element and `self.namespaces`
-        to the default JATS namespace mapping used in XPath queries.
+        XML syntax failures that cannot be recovered remain lxml
+        ``XMLSyntaxError`` exceptions. A readable XML document whose root is
+        not ``article`` raises :class:`JATSParseError`.
         """
         xml = Path(path).read_bytes()
-        self.root = etree.fromstring(xml, parser=self._xml_parser)
-        self.namespaces = {"j": self.root.nsmap[None]}
+        root = etree.fromstring(xml, parser=self._xml_parser)
+        document = JATSDocument.from_root(root)
+        if self._local_name(document.root) != "article":
+            raise JATSParseError(
+                "XML root must be a JATS <article> element, got "
+                f"<{self._local_name(document.root)}>"
+            )
+
+        self.document = document
+        self.parser_diagnostics = self._xml_recovery_diagnostics()
+        if self.parser_diagnostics:
+            logger.warning(
+                "Recovered from {} XML parsing issues in {}",
+                len(self.parser_diagnostics),
+                path,
+            )
+        return document
+
+    def _xml_recovery_diagnostics(self) -> tuple[ParserDiagnostic, ...]:
+        """Convert the current libxml2 error log into immutable diagnostics."""
+        return tuple(
+            ParserDiagnostic(
+                code=ParserDiagnosticCode.XML_RECOVERY,
+                message=entry.message.strip(),
+                line=entry.line,
+                column=entry.column,
+                level=entry.level_name,
+                domain=entry.domain_name,
+                error_type=entry.type_name,
+            )
+            for entry in self._xml_parser.error_log
+        )
 
 
 class JATSParser:
