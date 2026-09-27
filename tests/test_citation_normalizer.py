@@ -18,6 +18,7 @@ from pmcortex.models import (
     SentencePosition,
 )
 from pmcortex.serialization import render_positioned_sentences
+from pmcortex.sentence_segmenter import SentenceSegmenter
 
 
 class TestCitationNormalizer(unittest.TestCase):
@@ -288,13 +289,13 @@ class TestCitationNormalizer(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            _ArticleParseSession._split_sentences(
+            SentenceSegmenter().split(
                 separate_citations_result.text_with_markers
             ),
-            [
+            (
                 "First claim [xref:R1].",
                 "[xref:R2] independently reports this.",
-            ],
+            ),
         )
 
     def test_public_api_rejects_iterators_and_recognizes_label_only_ids(self) -> None:
@@ -656,28 +657,28 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
     def test_sentence_splitting_handles_et_al_and_retained_range_separators(self) -> None:
         """Post-period markers must not suppress a following sentence boundary."""
         self.assertEqual(
-            _ArticleParseSession._split_sentences(
+            SentenceSegmenter().split(
                 "Smith et al. [xref:R1] Subsequent work continued."
             ),
-            ["Smith et al. [xref:R1]", "Subsequent work continued."],
+            ("Smith et al. [xref:R1]", "Subsequent work continued."),
         )
         self.assertEqual(
-            _ArticleParseSession._split_sentences(
+            SentenceSegmenter().split(
                 "Smith et al. (2020) reported this result."
             ),
-            ["Smith et al. (2020) reported this result."],
+            ("Smith et al. (2020) reported this result.",),
         )
         self.assertEqual(
-            _ArticleParseSession._split_sentences(
+            SentenceSegmenter().split(
                 "Smith et al. [xref:R1] reported this result."
             ),
-            ["Smith et al. [xref:R1] reported this result."],
+            ("Smith et al. [xref:R1] reported this result.",),
         )
         self.assertEqual(
-            _ArticleParseSession._split_sentences(
+            SentenceSegmenter().split(
                 "Claim. [xref:R5] – [xref:R3] Next sentence."
             ),
-            ["Claim. [xref:R5] – [xref:R3]", "Next sentence."],
+            ("Claim. [xref:R5] – [xref:R3]", "Next sentence."),
         )
 
 

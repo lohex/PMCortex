@@ -186,7 +186,7 @@ class PMCIngestionPipeline:
         *,
         parser_workers: int = 4,
         delete_jats_after_success: bool = False,
-        parser_schema_version: str = "2",
+        parser_schema_version: str = "3",
         verbose: bool = False,
     ) -> None:
         """Configure ingestion without taking ownership of the downloader.

@@ -21,6 +21,7 @@ from pmcortex.serialization import (
     author_lists_to_payload,
     normalize_author_lists,
 )
+from pmcortex.sentence_segmenter import SentenceSegmenter
 from tests._shared import existing_example_files
 
 
@@ -217,13 +218,16 @@ class TestJATSParserResultAPI(unittest.TestCase):
 class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
     """Record limitations that later refactoring phases intentionally change."""
 
-    def test_question_and_exclamation_marks_are_not_sentence_boundaries(self) -> None:
-        """Record that question and exclamation marks are not boundaries yet."""
+    def test_question_and_exclamation_marks_are_sentence_boundaries(self) -> None:
+        """Phase 4 intentionally recognizes question and exclamation endings."""
         text = "Is this supported? Yes it is! Final statement."
 
-        sentences = _ArticleParseSession._split_sentences(text)
+        sentences = SentenceSegmenter().split(text)
 
-        self.assertEqual(sentences, [text])
+        self.assertEqual(
+            sentences,
+            ("Is this supported?", "Yes it is!", "Final statement."),
+        )
 
     def test_alignment_mismatch_sets_query_raw_to_none(self) -> None:
         """The current parser keeps a context but drops raw text after misalignment."""

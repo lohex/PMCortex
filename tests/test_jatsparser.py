@@ -11,6 +11,7 @@ from pmcortex.serialization import (
     references_to_dataframe,
     render_positioned_sentences,
 )
+from pmcortex.sentence_segmenter import SentenceSegmenter
 
 from tests._shared import EXAMPLE_PMCIDS, existing_example_files
 
@@ -118,6 +119,44 @@ class TestJATSParser(unittest.TestCase):
             ],
         )
 
+    def test_context_extraction_uses_question_and_exclamation_boundaries(self) -> None:
+        """Parser sentence positions follow the Phase-4 segmenter rules."""
+        parser = self._parser_from_xml(
+            """
+            <article xmlns="http://jats.nlm.nih.gov">
+              <body><sec><p>
+                Initial question? Cited claim
+                <xref ref-type="bibr" rid="R1">1</xref>! Final sentence.
+              </p></sec></body>
+            </article>
+            """
+        )
+        parser.pmcid = "PMC_TEST"
+        references = (
+            Reference(
+                rid="R1",
+                label="1",
+                doi=None,
+                pmid="12345",
+                pmcid=None,
+                year=None,
+                title=None,
+                journal=None,
+                authors=(),
+            ),
+        )
+
+        parser.extract_contexts(
+            parser.extract_sections(),
+            references,
+            save_sentences=True,
+        )
+
+        self.assertEqual(len(parser.sentences), 3)
+        self.assertEqual(len(parser.contexts), 1)
+        self.assertEqual(parser.contexts[0].position.sentence_index, 1)
+        self.assertEqual(parser.contexts[0].query, "Cited claim!")
+
     def test_sources_to_dataframe_has_reference_fields(self) -> None:
         pmcid, path = next(iter(existing_example_files().items()))
         result = JATSParser().parse(path, expected_pmcid=pmcid)
@@ -128,11 +167,11 @@ class TestJATSParser(unittest.TestCase):
 
     def test_split_sentences_does_not_split_inside_dotted_abbreviations(self) -> None:
         text = "This was conducted in the U.S. cohort."
-        sentences = _ArticleParseSession._split_sentences(text)
+        sentences = SentenceSegmenter().split(text)
 
         self.assertEqual(
             sentences,
-            ["This was conducted in the U.S. cohort."],
+            ("This was conducted in the U.S. cohort.",),
         )
 
     def test_replace_refs_extracts_figure_caption_as_separate_paragraph(self) -> None:

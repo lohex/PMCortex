@@ -71,6 +71,11 @@ from .serialization import (
     render_diagnostics_json,
     render_positioned_sentences,
 )
+from .sentence_segmenter import (
+    DEFAULT_SENTENCE_SEGMENTATION_CONFIG,
+    SentenceSegmentationConfig,
+    SentenceSegmenter,
+)
 
 __all__ = [
     "CitationDiagnostic",
@@ -107,6 +112,9 @@ __all__ = [
     "QueryFilterPipeline",
     "Reference",
     "SentencePosition",
+    "SentenceSegmentationConfig",
+    "SentenceSegmenter",
+    "DEFAULT_SENTENCE_SEGMENTATION_CONFIG",
     "author_lists_to_payload",
     "assess_residual_citation_spoiler",
     "assert_no_residual_citation_spoilers",

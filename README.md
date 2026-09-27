@@ -67,7 +67,9 @@ both positives and reusable hard negatives.
 ```text
 .
 ├── src/pmcortex/
-│   ├── jatsparser.py         # metadata, references, and citation contexts
+│   ├── jatsparser.py         # public parser facade and context orchestration
+│   ├── jats_extraction.py    # stateless metadata/reference/section extraction
+│   ├── sentence_segmenter.py # deterministic sentence boundaries
 │   ├── query_filters.py      # query filtering and hard-negative selection
 │   ├── downloader.py         # PMC JATS downloads through OAI-PMH
 │   ├── mesh.py               # PubMed abstracts and MeSH annotations

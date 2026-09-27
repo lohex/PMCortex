@@ -157,6 +157,7 @@ class TestPMCIngestionPipeline(unittest.TestCase):
                 status_path = dataset_root / "status" / "PMC3438321.json"
                 status_data = json.loads(status_path.read_text(encoding="utf-8"))
                 self.assertEqual(status_data["status"], "persist_error")
+                self.assertEqual(status_data["parser_schema_version"], "3")
             finally:
                 downloader.close()
 
