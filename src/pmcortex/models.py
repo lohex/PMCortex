@@ -165,7 +165,7 @@ class SentencePosition:
 
 @dataclass(frozen=True, slots=True)
 class PositionedSentence:
-    """One normalized full-text sentence with its structural article position."""
+    """One visible original sentence with its structural article position."""
 
     position: SentencePosition
     text: str
@@ -189,20 +189,22 @@ class ParserDiagnosticCode(StrEnum):
     """Closed set of recoverable XML and parser-level problems."""
 
     XML_RECOVERY = "xml_recovery"
+    SENTENCE_ALIGNMENT_FAILED = "sentence_alignment_failed"
 
 
 @dataclass(frozen=True, slots=True)
 class ParserDiagnostic:
-    """One XML parser problem recovered while reading a JATS document.
+    """One recoverable XML or sentence-alignment parser problem.
 
     Attributes:
         code: Stable machine-readable parser diagnosis category.
-        message: Human-readable libxml2 error message.
+        message: Human-readable error, including article and block position
+            for alignment failures.
         line: One-based source line, or zero when unavailable.
         column: One-based source column, or zero when unavailable.
-        level: Libxml2 severity name.
-        domain: Libxml2 subsystem name.
-        error_type: Libxml2 error type name.
+        level: Severity name.
+        domain: Problem source.
+        error_type: Stable source-specific error type.
     """
 
     code: ParserDiagnosticCode

@@ -1,5 +1,6 @@
 """Parse PMC JATS XML into retrieval queries and cited documents."""
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -47,6 +48,15 @@ from pmcortex.sentence_segmenter import SentenceSegmenter
 
 class JATSParseError(ValueError):
     """A technically readable XML document is not a JATS article."""
+
+
+@dataclass(frozen=True, slots=True)
+class _AlignedSentence:
+    """One visible source sentence paired with its marker-bearing query."""
+
+    position: SentencePosition
+    source_text: str
+    query_text_with_markers: str
 
 
 class _ArticleParseSession:
@@ -143,6 +153,7 @@ class _ArticleParseSession:
                 self.parser_diagnostics + tuple(self.citation_diagnostics)
             ),
             unsafe_citation_rejection_count=self.unsafe_citation_rejections,
+            alignment_rejection_count=self.alignment_rejections,
         )
         return ParsedJATSResult(article=article, extraction=extraction)
 
@@ -215,21 +226,20 @@ class _ArticleParseSession:
 
     def _context_from_sentence(
         self,
-        sentence: PositionedSentence,
+        sentence: _AlignedSentence,
         normalizer: CitationNormalizer,
         ref_id_to_pmid: dict[str, str],
         unsafe_citation_rids: frozenset[str],
         citation_occurrences: tuple[CitationOccurrence, ...],
-        raw_sentence_text: str | None,
     ) -> Context | None:
         """
-        Build one retrieval context from a marker-bearing positioned sentence.
+        Build one retrieval context from an aligned source/query sentence.
 
         PMID hits are stable-deduplicated because the benchmark represents cited
         documents, not repeated citation occurrences. On success, the query is
         stored as ``self.last_context`` for the next emitted context.
         """
-        cited_rids = normalizer.extract_rids(sentence.text)
+        cited_rids = normalizer.extract_rids(sentence.query_text_with_markers)
         has_unsafe_citation = bool(
             set(cited_rids).intersection(unsafe_citation_rids)
         )
@@ -245,7 +255,7 @@ class _ArticleParseSession:
         if not pmid_hits:
             return None
 
-        clean_query = normalizer.remove_markers(sentence.text)
+        clean_query = normalizer.remove_markers(sentence.query_text_with_markers)
         if not clean_query:
             return None
 
@@ -267,13 +277,9 @@ class _ArticleParseSession:
             if has_parenthetical_author_year
             else CitationCleanupAction.REMOVED_LABEL_CITATION
         )
-        raw_query = None
-        if raw_sentence_text is not None:
-            raw_query = normalizer.remove_markers(raw_sentence_text)
-
         context = Context(
             position=sentence.position,
-            query_raw=raw_query,
+            query_raw=sentence.source_text,
             query=clean_query,
             citation_forms=citation_forms,
             citation_cleanup_action=cleanup_action,
@@ -296,8 +302,8 @@ class _ArticleParseSession:
         Build reference contexts from parsed sections.
 
         Populates ``self.contexts`` with positioned :class:`Context` values. If
-        ``save_sentences`` is true, marker-bearing full-text sentences are kept
-        in ``self.sentences`` at exactly the same structural positions.
+        ``save_sentences`` is true, visible original sentences are kept
+        in ``self.sentences`` at structural positions.
 
         Raises:
             RuntimeError: If no source PMCID has been assigned to the parser.
@@ -309,6 +315,7 @@ class _ArticleParseSession:
         self.sentences: list[PositionedSentence] = []
         self.citation_diagnostics: list[CitationDiagnostic] = []
         self.unsafe_citation_rejections = 0
+        self.alignment_rejections = 0
 
         normalizer = self._build_citation_normalizer(references)
         ref_id_to_pmid = {
@@ -320,45 +327,63 @@ class _ArticleParseSession:
             for p, ref_paragraph in enumerate(section.paragraphs):
                 next_sentence_index = 0
                 normalized_blocks = self._normalize_refs(ref_paragraph, normalizer)
-                for normalized in normalized_blocks:
+                for block_index, normalized in enumerate(normalized_blocks):
                     self.citation_diagnostics.extend(normalized.diagnostics)
-                    sentence_texts = self._sentence_segmenter.split(
+                    source_texts = self._sentence_segmenter.split(
+                        normalized.source_text
+                    )
+                    query_texts = self._sentence_segmenter.split(
                         normalized.query_text_with_markers
                     )
-                    raw_sentence_texts = self._sentence_segmenter.split(
-                        normalized.text_with_markers
-                    )
-                    raw_sentences_align = (
-                        len(raw_sentence_texts) == len(sentence_texts)
-                    )
-                    sentences = [
-                        PositionedSentence(
-                            position=SentencePosition(
-                                source_pmcid=self.pmcid,
-                                section_index=s,
-                                paragraph_index=p,
-                                sentence_index=next_sentence_index + index,
-                            ),
-                            text=sentence_text,
+                    positions = tuple(
+                        SentencePosition(
+                            source_pmcid=self.pmcid,
+                            section_index=s,
+                            paragraph_index=p,
+                            sentence_index=next_sentence_index + index,
                         )
-                        for index, sentence_text in enumerate(sentence_texts)
-                    ]
-                    next_sentence_index += len(sentences)
+                        for index in range(len(source_texts))
+                    )
+                    next_sentence_index += len(source_texts)
                     if save_sentences:
-                        self.sentences.extend(sentences)
-                    for block_sentence_index, sentence in enumerate(sentences):
-                        raw_sentence_text = None
-                        if raw_sentences_align:
-                            raw_sentence_text = raw_sentence_texts[
-                                block_sentence_index
-                            ]
+                        self.sentences.extend(
+                            PositionedSentence(position=position, text=source_text)
+                            for position, source_text in zip(
+                                positions, source_texts, strict=True
+                            )
+                        )
+                    if len(source_texts) != len(query_texts):
+                        self.alignment_rejections += 1
+                        self.parser_diagnostics += (
+                            ParserDiagnostic(
+                                code=ParserDiagnosticCode.SENTENCE_ALIGNMENT_FAILED,
+                                message=(
+                                    f"{self.pmcid}: section {s}, paragraph {p}, "
+                                    f"block {block_index}: {len(source_texts)} source "
+                                    f"sentences, {len(query_texts)} query sentences"
+                                ),
+                                line=ref_paragraph.sourceline or 0,
+                                column=0,
+                                level="WARNING",
+                                domain="JATS_ALIGNMENT",
+                                error_type="SENTENCE_COUNT_MISMATCH",
+                            ),
+                        )
+                        continue
+                    for position, source_text, query_text in zip(
+                        positions, source_texts, query_texts, strict=True
+                    ):
+                        aligned = _AlignedSentence(
+                            position=position,
+                            source_text=source_text,
+                            query_text_with_markers=query_text,
+                        )
                         context = self._context_from_sentence(
-                            sentence,
+                            aligned,
                             normalizer,
                             ref_id_to_pmid,
                             frozenset(normalized.unsafe_citation_rids),
                             normalized.citation_occurrences,
-                            raw_sentence_text,
                         )
                         if context is not None:
                             self.contexts.append(context)

@@ -75,6 +75,7 @@ def _snapshot_parser_output(
         ],
         "contexts": [
             {
+                "sentence_id": context.position.sentence_id,
                 "source_pmcid": context.position.source_pmcid,
                 "section_index": context.position.section_index,
                 "paragraph_index": context.position.paragraph_index,
@@ -92,6 +93,7 @@ def _snapshot_parser_output(
         ],
         "sentences": [
             {
+                "sentence_id": sentence.position.sentence_id,
                 "section_index": sentence.position.section_index,
                 "paragraph_index": sentence.position.paragraph_index,
                 "sentence_index": sentence.position.sentence_index,
@@ -113,6 +115,7 @@ def _snapshot_parser_output(
         "unsafe_citation_rejection_count": (
             result.unsafe_citation_rejection_count
         ),
+        "alignment_rejection_count": result.alignment_rejection_count,
     }
     return _as_json_object(payload)
 
@@ -229,8 +232,8 @@ class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
             ("Is this supported?", "Yes it is!", "Final statement."),
         )
 
-    def test_alignment_mismatch_sets_query_raw_to_none(self) -> None:
-        """The current parser keeps a context but drops raw text after misalignment."""
+    def test_alignment_mismatch_rejects_context_and_records_diagnostic(self) -> None:
+        """A block with different sentence counts is rejected and diagnosed."""
         parser = _ArticleParseSession()
         parser.pmcid = "PMC_TEST"
         paragraph = etree.fromstring(b"<p/>")
@@ -268,13 +271,20 @@ class TestJATSParserKnownBaselineLimitations(unittest.TestCase):
                 ),
             ),
             diagnostics=(),
+            source_text="Claim. Next 1.",
         )
 
         with patch.object(parser, "_normalize_refs", return_value=[normalized]):
-            parser.extract_contexts(sections, references)
+            parser.extract_contexts(sections, references, save_sentences=True)
 
-        self.assertEqual(len(parser.contexts), 1)
-        self.assertIsNone(parser.contexts[0].query_raw)
+        self.assertEqual(
+            tuple(sentence.text for sentence in parser.sentences),
+            ("Claim.", "Next 1."),
+        )
+        self.assertEqual(parser.contexts, [])
+        self.assertEqual(parser.alignment_rejections, 1)
+        self.assertEqual(parser.parser_diagnostics[0].code.value, "sentence_alignment_failed")
+        self.assertIn("PMC_TEST: section 0, paragraph 0, block 0", parser.parser_diagnostics[0].message)
 
     def test_state_dependent_methods_are_absent_from_public_parser(self) -> None:
         """The breaking facade exposes no state-dependent result accessors."""
@@ -333,6 +343,7 @@ class TestCurrentArtifactSchema(unittest.TestCase):
         self.assertEqual(
             CONTEXT_COLUMNS,
             (
+                "sentence_id",
                 "source_pmcid",
                 "section_index",
                 "paragraph_index",

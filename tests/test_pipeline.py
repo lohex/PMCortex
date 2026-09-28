@@ -40,6 +40,7 @@ class TestPMCIngestionPipeline(unittest.TestCase):
 
                 self.assertEqual(len(records), 1)
                 self.assertEqual(records[0].status, "complete")
+                self.assertEqual(records[0].alignment_rejection_count, 0)
                 self.assertFalse(jats_path.exists())
                 self.assertTrue(
                     (dataset_root / "status" / "PMC3438321.json").is_file()
@@ -65,6 +66,15 @@ class TestPMCIngestionPipeline(unittest.TestCase):
                 contexts = pd.read_csv(tables.contexts)
                 self.assertIn("source_pmcid", contexts.columns)
                 self.assertTrue(contexts["source_pmcid"].eq("PMC3438321").all())
+                fulltext_lines = (
+                    dataset_root / "fulltexts" / "PMC3438321.txt"
+                ).read_text(encoding="utf-8").splitlines()
+                sentences_by_id = dict(line.split("\t", 1) for line in fulltext_lines)
+                for row in contexts.itertuples():
+                    self.assertEqual(sentences_by_id[row.sentence_id], row.query_raw)
+                self.assertTrue(
+                    all("[xref:" not in sentence for sentence in sentences_by_id.values())
+                )
 
                 with patch.object(
                     downloader,
@@ -82,6 +92,53 @@ class TestPMCIngestionPipeline(unittest.TestCase):
                 )
                 progress = progress_factory.return_value.__enter__.return_value
                 progress.update.assert_not_called()
+            finally:
+                downloader.close()
+
+    def test_alignment_failure_persists_source_and_rejection(self) -> None:
+        """A misaligned block keeps its source and records a rejected context."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            dataset_root = Path(temporary_directory)
+            jats_dir = dataset_root / "xml_jats"
+            jats_dir.mkdir()
+            jats_path = jats_dir / "PMC9000004.nxml"
+            jats_path.write_text(
+                "<article><front><article-meta>"
+                '<article-id pub-id-type="pmcid">PMC9000004</article-id>'
+                "</article-meta></front><body><sec><p>"
+                'First claim.<xref ref-type="bibr" rid="R1">1</xref> '
+                "Second sentence."
+                "</p></sec></body><back><ref-list><ref id='R1'>"
+                "<label>1</label><element-citation>"
+                '<pub-id pub-id-type="pmid">101</pub-id>'
+                "</element-citation></ref></ref-list></back></article>",
+                encoding="utf-8",
+            )
+            downloader = PMCJATSDownloader(jats_dir)
+            try:
+                pipeline = PMCIngestionPipeline(
+                    dataset_root,
+                    downloader,
+                    parser_workers=1,
+                )
+                records = pipeline.parse_available()
+
+                self.assertEqual(records[0].status, "complete")
+                self.assertEqual(records[0].alignment_rejection_count, 1)
+                artifact_dir = dataset_root / "parsed" / "PMC9000004"
+                contexts = pd.read_csv(artifact_dir / "contexts.csv")
+                self.assertTrue(contexts.empty)
+                fulltext = (
+                    dataset_root / "fulltexts" / "PMC9000004.txt"
+                ).read_text(encoding="utf-8")
+                self.assertIn("PMC9000004/0/0/0\tFirst claim.1 Second sentence.", fulltext)
+                diagnostics = json.loads(
+                    (artifact_dir / "diagnostics.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(diagnostics[0]["code"], "sentence_alignment_failed")
+                self.assertIn("PMC9000004: section 0, paragraph 0, block 0", diagnostics[0]["message"])
             finally:
                 downloader.close()
 
@@ -157,7 +214,7 @@ class TestPMCIngestionPipeline(unittest.TestCase):
                 status_path = dataset_root / "status" / "PMC3438321.json"
                 status_data = json.loads(status_path.read_text(encoding="utf-8"))
                 self.assertEqual(status_data["status"], "persist_error")
-                self.assertEqual(status_data["parser_schema_version"], "3")
+                self.assertEqual(status_data["parser_schema_version"], "4")
             finally:
                 downloader.close()
 

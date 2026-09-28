@@ -173,7 +173,7 @@ class TestCitationNormalizer(unittest.TestCase):
         ]
         self.assertEqual(
             render_positioned_sentences(tuple(parser.sentences)),
-            "0/0/0\tCall foo() and retain [].",
+            "PMC_TEST/0/0/0\tCall foo() and retain [].",
         )
 
     def test_nested_semantic_xref_is_removed_and_classified_as_unsafe(self) -> None:
@@ -551,7 +551,7 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
         self.assertEqual(parser.contexts[0].n_hits, 3)
         self.assertEqual(
             render_positioned_sentences(tuple(parser.sentences)),
-            "0/0/0\tEvidence [xref:R1], [xref:R2], [xref:R3] supports this.",
+            "PMC_TEST/0/0/0\tEvidence [1 -3] supports this.",
         )
 
     def test_parser_keeps_clean_parenthetical_query_and_rejects_narrative(self) -> None:
@@ -598,6 +598,8 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
         self.assertEqual(len(parser.contexts), 1)
         self.assertEqual(parser.contexts[0].query, "Safe claim.")
         self.assertEqual(parser.contexts[0].query_raw, "Safe claim (Smith, 2020).")
+        self.assertEqual(parser.sentences[0].text, parser.contexts[0].query_raw)
+        self.assertEqual(parser.sentences[1].text, "Jones (2021) reported this.")
         self.assertEqual(
             parser.contexts[0].citation_forms,
             (CitationForm.PARENTHETICAL_AUTHOR_YEAR.value,),
@@ -608,8 +610,8 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
         )
         self.assertEqual(parser.unsafe_citation_rejections, 1)
 
-    def test_citation_after_period_stays_with_preceding_sentence(self) -> None:
-        """A post-period xref must retain the cited sentence's structural index."""
+    def test_citation_after_period_with_no_space_is_rejected(self) -> None:
+        """Different visible and query sentence counts reject the whole block."""
         parser = _ArticleParseSession()
         root = etree.fromstring(
             b"""
@@ -643,15 +645,12 @@ class TestCitationNormalizerIntegration(unittest.TestCase):
             save_sentences=True,
         )
 
-        self.assertEqual(len(parser.contexts), 1)
-        self.assertEqual(parser.contexts[0].query, "First claim.")
-        self.assertEqual(parser.contexts[0].position.sentence_index, 0)
+        self.assertEqual(parser.contexts, [])
+        self.assertEqual(parser.alignment_rejections, 1)
+        self.assertEqual(parser.parser_diagnostics[0].code.value, "sentence_alignment_failed")
         self.assertEqual(
             render_positioned_sentences(tuple(parser.sentences)).splitlines(),
-            [
-                "0/0/0\tFirst claim. [xref:R1]",
-                "0/0/1\tSecond sentence.",
-            ],
+            ["PMC_TEST/0/0/0\tFirst claim.1 Second sentence."],
         )
 
     def test_sentence_splitting_handles_et_al_and_retained_range_separators(self) -> None:

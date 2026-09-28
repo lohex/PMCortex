@@ -601,7 +601,7 @@ def sections_to_public(
         references: Article references needed for citation markers.
 
     Returns:
-        Public sections containing marker-bearing source blocks.
+        Public sections containing visible, marker-free source blocks.
 
     Raises:
         TypeError: If a collection contains an unexpected value.
@@ -618,7 +618,7 @@ def sections_to_public(
             full_title=section.full_title,
             source_blocks=tuple(
                 " ".join(
-                    normalized.text_with_markers
+                    normalized.source_text
                     for normalized in normalize_paragraph_blocks(
                         document,
                         paragraph,

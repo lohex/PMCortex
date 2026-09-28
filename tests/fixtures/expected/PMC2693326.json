@@ -4,7 +4,9 @@
     "pmid": "23010002",
     "title": "Fixture article on immune responses",
     "abstract": "A compact synthetic article used to test JATS parsing.",
-    "authors": ["Garcia M"]
+    "authors": [
+      "Garcia M"
+    ]
   },
   "references": [
     {
@@ -16,7 +18,9 @@
       "year": 2021,
       "title": "Receptor control of immune activation",
       "journal": "Journal of Fixture Immunology",
-      "authors": ["Chen L"]
+      "authors": [
+        "Chen L"
+      ]
     }
   ],
   "sections": [
@@ -28,15 +32,20 @@
   ],
   "contexts": [
     {
+      "sentence_id": "PMC2693326/0/0/0",
       "source_pmcid": "PMC2693326",
       "section_index": 0,
       "paragraph_index": 0,
       "sentence_index": 0,
-      "query_raw": "Immune activation depended on receptor abundance.",
+      "query_raw": "Immune activation depended on receptor abundance 1.",
       "query": "Immune activation depended on receptor abundance.",
-      "citation_forms": ["label_only"],
+      "citation_forms": [
+        "label_only"
+      ],
       "citation_cleanup_action": "removed_label_citation",
-      "hits": ["31000002"],
+      "hits": [
+        "31000002"
+      ],
       "query_length": 6,
       "n_hits": 1,
       "context": null
@@ -44,16 +53,24 @@
   ],
   "sentences": [
     {
+      "sentence_id": "PMC2693326/0/0/0",
       "section_index": 0,
       "paragraph_index": 0,
       "sentence_index": 0,
-      "text": "Immune activation depended on receptor abundance [xref:R1]."
+      "text": "Immune activation depended on receptor abundance 1."
     }
   ],
   "normalized_authors_and_refs": {
-    "authors": ["Garcia M"],
-    "cited_authors": [["Chen L"]]
+    "authors": [
+      "Garcia M"
+    ],
+    "cited_authors": [
+      [
+        "Chen L"
+      ]
+    ]
   },
   "citation_diagnostics": [],
-  "unsafe_citation_rejection_count": 0
+  "unsafe_citation_rejection_count": 0,
+  "alignment_rejection_count": 0
 }

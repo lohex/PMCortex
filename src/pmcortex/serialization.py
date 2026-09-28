@@ -39,6 +39,7 @@ SOURCE_COLUMNS: tuple[str, ...] = (
     "source_pmcid",
 )
 CONTEXT_COLUMNS: tuple[str, ...] = (
+    "sentence_id",
     "source_pmcid",
     "section_index",
     "paragraph_index",
@@ -132,6 +133,7 @@ def contexts_to_dataframe(contexts: tuple[Context, ...]) -> pd.DataFrame:
 
     rows = [
         {
+            "sentence_id": context.position.sentence_id,
             "source_pmcid": context.position.source_pmcid,
             "section_index": context.position.section_index,
             "paragraph_index": context.position.paragraph_index,
@@ -153,7 +155,7 @@ def contexts_to_dataframe(contexts: tuple[Context, ...]) -> pd.DataFrame:
 def render_positioned_sentences(
     sentences: tuple[PositionedSentence, ...],
 ) -> str:
-    """Render sentences in the pre-refactoring fulltext line format."""
+    """Render each visible source sentence with its canonical ID."""
     if not isinstance(sentences, tuple):
         raise TypeError("sentences must be a tuple")
     if not all(isinstance(sentence, PositionedSentence) for sentence in sentences):
@@ -161,10 +163,7 @@ def render_positioned_sentences(
 
     return "\n".join(
         (
-            f"{sentence.position.section_index}/"
-            f"{sentence.position.paragraph_index}/"
-            f"{sentence.position.sentence_index}\t"
-            f"{sentence.text}"
+            f"{sentence.position.sentence_id}\t{sentence.text}"
         )
         for sentence in sentences
     )

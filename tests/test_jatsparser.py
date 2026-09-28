@@ -96,6 +96,7 @@ class TestJATSParser(unittest.TestCase):
 
         context = contexts_to_dataframe(tuple(parser.contexts)).iloc[0]
         self.assertEqual(context["source_pmcid"], "PMC_TEST")
+        self.assertEqual(context["sentence_id"], "PMC_TEST/0/0/1")
         self.assertEqual(context["section_index"], 0)
         self.assertEqual(context["paragraph_index"], 0)
         self.assertEqual(context["sentence_index"], 1)
@@ -111,10 +112,10 @@ class TestJATSParser(unittest.TestCase):
             render_positioned_sentences(tuple(parser.sentences)).splitlines(),
             [
                 (
-                    "0/0/0\tFirst sentence."
+                    "PMC_TEST/0/0/0\tFirst sentence."
                 ),
                 (
-                    "0/0/1\tCited sentence [xref:R1]."
+                    "PMC_TEST/0/0/1\tCited sentence 1."
                 ),
             ],
         )

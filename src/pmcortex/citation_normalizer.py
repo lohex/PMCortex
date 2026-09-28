@@ -101,7 +101,11 @@ class CitationOccurrence:
 
 @dataclass(frozen=True, slots=True)
 class NormalizedCitationText:
-    """Full-text and query renderings produced from one mixed-content block."""
+    """Visible source and citation-aware query renderings of one XML block.
+
+    source_text contains original visible text with only whitespace collapsed.
+    Citation markers occur only in the internal query renderings.
+    """
 
     text_with_markers: str
     query_text_with_markers: str
@@ -109,6 +113,7 @@ class NormalizedCitationText:
     cited_rids: tuple[str, ...]
     citation_occurrences: tuple[CitationOccurrence, ...]
     diagnostics: tuple[CitationDiagnostic, ...]
+    source_text: str
 
     @property
     def unsafe_citation_rids(self) -> tuple[str, ...]:
@@ -311,6 +316,12 @@ class CitationNormalizer:
             diagnostics.extend(rendered_run.diagnostics)
             index = run_end + 1
 
+        source_text = " ".join(
+            "".join(
+                token.text if isinstance(token, TextToken) else token.display_text
+                for token in tokens
+            ).split()
+        )
         full_text = self._normalize_text("".join(full_parts))
         query_text_with_markers = self._normalize_text("".join(query_parts))
         query_text = self.remove_markers(query_text_with_markers)
@@ -322,6 +333,7 @@ class CitationNormalizer:
             cited_rids=self._stable_unique(cited_rids),
             citation_occurrences=tuple(occurrences),
             diagnostics=tuple(diagnostics),
+            source_text=source_text,
         )
 
     def normalize_fragments(

@@ -121,6 +121,7 @@ class ProcessingRecord:
     source_mtime_ns: int | None
     diagnostic_count: int
     unsafe_citation_rejection_count: int
+    alignment_rejection_count: int
     updated_at: str
 
 
@@ -186,7 +187,7 @@ class PMCIngestionPipeline:
         *,
         parser_workers: int = 4,
         delete_jats_after_success: bool = False,
-        parser_schema_version: str = "3",
+        parser_schema_version: str = "4",
         verbose: bool = False,
     ) -> None:
         """Configure ingestion without taking ownership of the downloader.
@@ -549,6 +550,7 @@ class PMCIngestionPipeline:
                     unsafe_citation_rejection_count=(
                         parsed.unsafe_citation_rejection_count
                     ),
+                    alignment_rejection_count=parsed.alignment_rejection_count,
                 )
                 self._write_record(record)
                 records[pmcid] = record
@@ -558,14 +560,15 @@ class PMCIngestionPipeline:
             records[pmcid] = record
             self._log_info(
                 "Completed {}: {} references, {} contexts, {} sentences, "
-                "{} citation diagnostics, {} unsafe citation rejections "
-                "({} parser jobs pending)",
+                "{} diagnostics, {} unsafe citation rejections, "
+                "{} alignment rejections ({} parser jobs pending)",
                 pmcid,
                 len(parsed.article.references),
                 len(parsed.contexts),
                 len(parsed.sentences),
                 len(parsed.diagnostics),
                 parsed.unsafe_citation_rejection_count,
+                parsed.alignment_rejection_count,
                 len(pending),
             )
             self._delete_jats_if_requested(path)
@@ -620,6 +623,7 @@ class PMCIngestionPipeline:
             unsafe_citation_rejection_count=(
                 parsed.unsafe_citation_rejection_count
             ),
+            alignment_rejection_count=parsed.alignment_rejection_count,
             updated_at=self._timestamp(),
         )
         self._write_record(record)
@@ -650,6 +654,7 @@ class PMCIngestionPipeline:
             source_mtime_ns=None,
             diagnostic_count=0,
             unsafe_citation_rejection_count=0,
+            alignment_rejection_count=0,
             updated_at=self._timestamp(),
         )
 
@@ -662,6 +667,7 @@ class PMCIngestionPipeline:
         *,
         diagnostic_count: int = 0,
         unsafe_citation_rejection_count: int = 0,
+        alignment_rejection_count: int = 0,
     ) -> ProcessingRecord:
         """Build a failed parser or persistence record and retain its JATS."""
         source_stat = path.stat()
@@ -676,6 +682,7 @@ class PMCIngestionPipeline:
             source_mtime_ns=source_stat.st_mtime_ns,
             diagnostic_count=diagnostic_count,
             unsafe_citation_rejection_count=unsafe_citation_rejection_count,
+            alignment_rejection_count=alignment_rejection_count,
             updated_at=self._timestamp(),
         )
 
@@ -706,6 +713,9 @@ class PMCIngestionPipeline:
                 diagnostic_count=int(payload["diagnostic_count"]),
                 unsafe_citation_rejection_count=int(
                     payload.get("unsafe_citation_rejection_count", 0)
+                ),
+                alignment_rejection_count=int(
+                    payload.get("alignment_rejection_count", 0)
                 ),
                 updated_at=str(payload["updated_at"]),
             )

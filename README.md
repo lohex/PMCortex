@@ -173,20 +173,25 @@ The resulting tables represent:
 - `metadata`: the source article's PMCID, PMID, title, abstract, and authors
 - `sources`: documents in the source article's bibliography, including their
   DOI, PMID, and authors
-- `contexts`: sentence-derived queries and the bibliography references cited
-  by each query, together with `source_pmcid`, `section_index`,
-  `paragraph_index`, and `sentence_index`
+- `contexts`: sentence-derived cleaned queries and cited bibliography
+  references, with `sentence_id` and its `source_pmcid`, `section_index`,
+  `paragraph_index`, and `sentence_index` components. `query_raw` is the
+  aligned visible original sentence.
 
-Generated full-text files contain one sentence per line. Every line starts
-with the same structural indices used by the query table:
+Generated full-text files contain one visible original sentence per line,
+including visible citation labels. Only layout whitespace is collapsed. Each
+line starts with the canonical `sentence_id` stored in `contexts.csv`:
 
 ```text
-0/2/1	Sentence text...
+PMC3438321/0/2/1\tSentence text with visible citation [1]...
 ```
 
-Every article shard also contains `diagnostics.json`. It preserves detailed
-citation-normalization issues and XML repairs reported by libxml2; the status
-record contains their total count.
+`Context.query` contains the cleaned retrieval query. A block whose visible
+source and internal query have different sentence counts contributes full-text
+lines but no contexts. `diagnostics.json` records the article and block
+position; `alignment_rejection_count` counts rejected blocks in the parser
+result and the per-article status record. The diagnostic file also records
+citation-normalization issues and XML repairs.
 
 For a given row in `contexts`, `hits` identifies the positive references.
 Other entries in `sources` from the same `source_pmcid` are potential hard

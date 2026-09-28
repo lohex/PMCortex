@@ -4,7 +4,9 @@
     "pmid": "23010004",
     "title": "Fixture article on gene expression",
     "abstract": "A compact synthetic article used to test JATS parsing.",
-    "authors": ["Miller A"]
+    "authors": [
+      "Miller A"
+    ]
   },
   "references": [
     {
@@ -16,7 +18,9 @@
       "year": 2023,
       "title": "Regulation of target gene expression",
       "journal": "Journal of Fixture Genetics",
-      "authors": ["Wilson E"]
+      "authors": [
+        "Wilson E"
+      ]
     }
   ],
   "sections": [
@@ -28,15 +32,20 @@
   ],
   "contexts": [
     {
+      "sentence_id": "PMC10462751/0/0/0",
       "source_pmcid": "PMC10462751",
       "section_index": 0,
       "paragraph_index": 0,
       "sentence_index": 0,
-      "query_raw": "Expression of the target gene increased significantly.",
+      "query_raw": "Expression of the target gene increased significantly 1.",
       "query": "Expression of the target gene increased significantly.",
-      "citation_forms": ["label_only"],
+      "citation_forms": [
+        "label_only"
+      ],
       "citation_cleanup_action": "removed_label_citation",
-      "hits": ["31000004"],
+      "hits": [
+        "31000004"
+      ],
       "query_length": 7,
       "n_hits": 1,
       "context": null
@@ -44,16 +53,24 @@
   ],
   "sentences": [
     {
+      "sentence_id": "PMC10462751/0/0/0",
       "section_index": 0,
       "paragraph_index": 0,
       "sentence_index": 0,
-      "text": "Expression of the target gene increased significantly [xref:R1]."
+      "text": "Expression of the target gene increased significantly 1."
     }
   ],
   "normalized_authors_and_refs": {
-    "authors": ["Miller A"],
-    "cited_authors": [["Wilson E"]]
+    "authors": [
+      "Miller A"
+    ],
+    "cited_authors": [
+      [
+        "Wilson E"
+      ]
+    ]
   },
   "citation_diagnostics": [],
-  "unsafe_citation_rejection_count": 0
+  "unsafe_citation_rejection_count": 0,
+  "alignment_rejection_count": 0
 }
